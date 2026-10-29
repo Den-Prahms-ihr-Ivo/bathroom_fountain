@@ -103,6 +103,27 @@ static void test_saved_value_above_cap_is_clamped(void) /* AUD-05: cap */
     TEST_ASSERT_EQUAL_UINT8(24, volume_step(v));
 }
 
+static void test_clamped_saved_value_is_written_back(void) /* AUD-05: cap */
+{
+    cfg.max_step = 24;
+    create(true, 30);
+    uint8_t s = 0;
+    TEST_ASSERT_TRUE_MESSAGE(volume_take_save(v, T0, &s), "clamped value must be saved without waiting");
+    TEST_ASSERT_EQUAL_UINT8(24, s);
+    TEST_ASSERT_FALSE_MESSAGE(volume_take_save(v, T0 + 5000, &s), "must save only once");
+}
+
+static void test_turn_after_clamp_waits_for_rest_time(void)
+{
+    cfg.max_step = 24;
+    create(true, 30);
+    uint8_t s = 0;
+    volume_turn(v, -2, T0);
+    TEST_ASSERT_FALSE(volume_take_save(v, T0 + 1999, &s));
+    TEST_ASSERT_TRUE(volume_take_save(v, T0 + 2000, &s));
+    TEST_ASSERT_EQUAL_UINT8(22, s);
+}
+
 static void test_nothing_to_save_after_start(void)
 {
     create(true, 20);
@@ -256,6 +277,8 @@ int main(void)
     RUN_TEST(test_starts_at_default_without_saved_value);
     RUN_TEST(test_starts_at_saved_value);
     RUN_TEST(test_saved_value_above_cap_is_clamped);
+    RUN_TEST(test_clamped_saved_value_is_written_back);
+    RUN_TEST(test_turn_after_clamp_waits_for_rest_time);
     RUN_TEST(test_nothing_to_save_after_start);
     RUN_TEST(test_turning_changes_step);
     RUN_TEST(test_turning_clamps_at_zero_and_cap);
