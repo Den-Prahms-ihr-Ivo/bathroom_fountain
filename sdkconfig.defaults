@@ -1,0 +1,3 @@
+# Unit tests on the boards run inside app_main's task; the clap tests need
+# more than the default 3.5 KB of stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
