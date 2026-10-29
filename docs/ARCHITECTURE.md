@@ -21,11 +21,12 @@ Rules for `lib/` modules:
 
 | Task | Core | Priority | Job | Requirements |
 | --- | --- | --- | --- | --- |
-| `mic_task` | 1 | high | Read I2S1 (INMP441, 16 kHz), convert to int16, feed `clap_detector`, post `EVT_CLAP` | CLAP-01, NFR-01 |
-| `input_task` | 1 | medium | Rotary encoder (PCNT) and push switch; post `EVT_BUTTON`, `EVT_VOLUME` | BEH-03/04, AUD-05 |
-| `control_task` | 1 | medium | Own `mode_controller`; consume events; tick every 20 ms; apply outputs | BEH-*, AUD-06/07 |
-| `player_task` | 1 | high | microSD → MP3 decode → I2S0 → TAS5825M | AUD-01/02/09 |
-| `hue_task` | 0 | low | Keep the HTTPS connection to the bridge; recall scenes; retry in the background | LIGHT-01/02, NFR-07/09 |
+| `mic_task` | 1 | high | Read I2S1 (INMP441, 16 kHz) → `mic_frontend` → `clap_detector`, post `EVT_CLAP` | CLAP-01, CLAP-14, NFR-01 |
+| `input_task` | 1 | medium | Rotary encoder (PCNT) and push switch via `button`; post `EVT_BUTTON`, `EVT_VOLUME` | BEH-03/04, AUD-05 |
+| `control_task` | 1 | medium | Own `mode_controller` and `volume`; consume events; tick every 20 ms; apply outputs | BEH-*, AUD-05/06/07 |
+| `player_task` | 1 | high | microSD scan → `playlist` → MP3 decode → I2S0 → TAS5825M | AUD-01/02/03/09/12 |
+| `hue_task` | 0 | low | `hue_sender` decides what to send; `hue_api` builds and parses; keep-alive HTTPS to the bridge | LIGHT-01/02, NFR-07/09 |
+| `console_task` | 0 | low | Serial console: `set` / `get` / `show` through `settings`, persisted in NVS | CLAP-12, NFR-10, NFR-15 |
 
 Wi-Fi runs on core 0 by default, so the audio and control work sits on core 1.
 
@@ -51,12 +52,16 @@ Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_co
 
 | Module | Status | Contract |
 | --- | --- | --- |
-| `clap_detector` | Tests ready, to implement | `lib/clap_detector/clap_detector.h` |
-| `mode_controller` | Tests ready, to implement | `lib/mode_controller/mode_controller.h` |
-| `volume` | Tests ready, to implement | `lib/volume/volume.h` |
-| `hue_api` | Tests ready, to implement | `lib/hue_api/hue_api.h` |
-| `playlist` | Later | folder scan, loop order (AUD-02/03) |
-| drivers + tasks | Later | `src/` |
+| `clap_detector` | Done | `lib/clap_detector/clap_detector.h` |
+| `mode_controller` | Done | `lib/mode_controller/mode_controller.h` |
+| `volume` | Done | `lib/volume/volume.h` |
+| `hue_api` | Done | `lib/hue_api/hue_api.h` |
+| `mic_frontend` | Tests ready, to implement | `lib/mic_frontend/mic_frontend.h` |
+| `playlist` | Tests ready, to implement | `lib/playlist/playlist.h` |
+| `hue_sender` | Tests ready, to implement | `lib/hue_sender/hue_sender.h` |
+| `button` | Tests ready, to implement | `lib/button/button.h` |
+| `settings` | Tests ready, to implement | `lib/settings/settings.h` |
+| drivers + tasks | Next, once parts arrive | `src/` |
 
 ## Design decisions to know about
 
@@ -66,4 +71,9 @@ Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_co
 - **Hue commands are "latest wins"**: if the Hue task falls behind, only the newest scene is sent.
 - **Hue errors**: transport failures, 429 and 5xx are retried with backoff (0.5 s doubling to 30 s); 401/403 means the key is gone and needs re-pairing; 404 means the scene was deleted in the Hue app. Neither of the last two is retried.
 - **Volume is stored only after the knob rests for 2 s**, and only if the value actually changed, to spare the flash.
+- **Mic high-pass is a tuning knob** (CLAP-14): 20 Hz removes the DC offset; 100–300 Hz also weakens footstep and door thumps relative to claps. `tools/clap_lab.py tune` decides.
+- **Hue retries never give up**: the bridge must end up in the current mode's scene whenever it is reachable again. A command submitted while another is in flight supersedes it instead of queueing behind its retries.
+- **One settings table for console, NVS and the lab**: NVS stores each value as the same text the console accepts, and boot feeds it back through `settings_set()`, so a corrupt value falls back to the default instead of being used.
+- **Button**: SHORT fires on release (latency about 100–200 ms, inside NFR-06); LONG (3 s, physically held) is reserved for a later feature such as Hue re-pairing.
+- **Unplayable files** are skipped for the session (AUD-12); an empty or unreadable card never blocks the rest of Ambient (AUD-09).
 - **Hardware notes**: the LR7843 switch modules need at least 6 V on their power side, so the candle module switches the 12 V input of the 3 V buck. The microSD breakout runs from a second buck set to 5 V; its level shifter keeps SPI at 3.3 V.
