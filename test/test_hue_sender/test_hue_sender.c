@@ -196,8 +196,11 @@ static void test_auth_error_keeps_the_newer_command(void)
     hue_sender_submit(hs, &CMD_B, T0 + 10);
     hue_sender_report(hs, HUE_ERR_AUTH, T0 + 50);
     TEST_ASSERT_EQUAL_INT(HUE_SENDER_NEEDS_PAIRING, hue_sender_state(hs));
-    hue_sender_paired(hs, T0 + 100);
-    expect_send(T0 + 100, &CMD_B);
+    TEST_ASSERT_EQUAL_INT(HUE_ERR_AUTH, hue_sender_last_result(hs));
+    expect_nothing(T0 + 60000); /* the newer command is not sent with the rejected key */
+    hue_sender_paired(hs, T0 + 60000);
+    expect_send(T0 + 60000, &CMD_B);
+    TEST_ASSERT_EQUAL_UINT32(1, hue_sender_attempts(hs));
 }
 
 static void test_paired_without_command_goes_idle(void)
