@@ -22,8 +22,10 @@
  *   counts an attempt and the command is in flight until report().
  *
  *   A command submitted while another is in flight waits for that report and
- *   is then due immediately, whatever the in-flight result was. The in-flight
- *   command is never retried in that case: the newer one supersedes it.
+ *   is then due immediately (attempts 0), whatever the in-flight result was,
+ *   except HUE_ERR_AUTH: then the newer command is kept in NEEDS_PAIRING, as
+ *   the same key would be rejected again. The in-flight command is never
+ *   retried in either case: the newer one supersedes it.
  *
  *   report() of the in-flight command, with no newer command waiting:
  *     HUE_OK                       done, IDLE, attempts back to 0
