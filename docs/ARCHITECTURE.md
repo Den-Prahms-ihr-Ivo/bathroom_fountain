@@ -23,7 +23,7 @@ Rules for `lib/` modules:
 | --- | --- | --- | --- | --- |
 | `mic_task` | 1 | high | Read I2S1 (INMP441, 16 kHz) → `mic_frontend` → `clap_detector`, post `EVT_CLAP` | CLAP-01, CLAP-14, NFR-01 |
 | `input_task` | 1 | medium | Rotary encoder (PCNT) and push switch via `button`; post `EVT_BUTTON`, `EVT_VOLUME` | BEH-03/04, AUD-05 |
-| `control_task` | 1 | medium | Own `mode_controller` and `volume`; write DIG_VOL via `amp_volume` when the code changes; consume events; tick every 20 ms; apply outputs | BEH-*, AUD-05/06/07 |
+| `control_task` | 1 | medium | Own `mode_controller`, `volume`, `outputs` and the `tas5825m` driver; consume events; tick every 20 ms; carry out the actions `outputs` plans | BEH-*, AUD-05/06/07 |
 | `player_task` | 1 | high | microSD scan → `playlist` → MP3 decode → `pcm_mix` (mono, left) → I2S0 → TAS5825M | AUD-01/02/03/09/12 |
 | `hue_task` | 0 | low | `hue_sender` decides what to send; `hue_api` builds and parses; keep-alive HTTPS to the bridge | LIGHT-01/02, NFR-07/09 |
 | `console_task` | 0 | low | Serial console: `set` / `get` / `show` through `settings`, persisted in NVS | CLAP-12, NFR-10, NFR-15 |
@@ -46,7 +46,21 @@ encoder + switch ──▶ input_task ──────────────
    (Wi-Fi, HTTPS)    (microSD, MP3)
 ```
 
-Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_controller`, applied through the TAS5825M's digital volume (AUD-05, AUD-06). `amp_volume` turns that product into the DIG_VOL register code (0.5 dB steps, 0x30 = 0 dB, 0xFF = mute), and the register is written only when the code changes.
+Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_controller`, applied through the TAS5825M's digital volume (AUD-05, AUD-06). The fade runs through `fade_curve`, so it changes evenly in dB. `amp_volume` turns the product into the DIG_VOL register code (0.5 dB steps, 0x30 = 0 dB, 0xFF = mute).
+
+Each control tick:
+
+```
+want = outputs_want_from_mode(mode outputs, volume gain)      // fade_curve + amp_volume inside
+for action in outputs_plan(want):                             // only what changed, fixed order
+    candles / fountain  → GPIO (LR7843 trigger)
+    music               → player command
+    amp power           → tas5825m_power_up() / tas5825m_power_down()
+    volume              → tas5825m_set_volume()
+    success → outputs_done(action); failure → stop, it is planned again next tick
+```
+
+The amplifier register is therefore written only when the code changes, and a failed I2C write is retried on the next tick without extra code.
 
 ## Modules
 
@@ -63,6 +77,9 @@ Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_co
 | `settings` | Tests ready, to implement | `lib/settings/settings.h` |
 | `pcm_mix` | Tests ready, to implement | `lib/pcm_mix/pcm_mix.h` |
 | `amp_volume` | Tests ready, to implement | `lib/amp_volume/amp_volume.h` |
+| `fade_curve` | Tests ready, to implement | `lib/fade_curve/fade_curve.h` |
+| `tas5825m` | Tests ready, to implement | `lib/tas5825m/tas5825m.h` |
+| `outputs` | Tests ready, to implement | `lib/outputs/outputs.h` |
 | drivers + tasks | Next, once parts arrive | `src/` |
 
 ## Design decisions to know about
@@ -79,5 +96,9 @@ Output volume = user volume (encoder, saved in NVS) × `fade_gain` from `mode_co
 - **Button**: SHORT fires on release (latency about 100–200 ms, inside NFR-06); LONG (3 s, physically held) is reserved for a later feature such as Hue re-pairing.
 - **One speaker, mono (AUD-01)**: stereo MP3s are averaged as (L+R)/2 in 32 bit (no clipping, truncation toward zero) and sent to the left output; the right output carries silence. `PCM_RIGHT_COPY` exists for a second speaker later.
 - **Mute only at fade 0**: any gain above zero maps to at most 0xFE (-103 dB), so the amplifier is muted exactly when the fade ends, never early. The module never boosts above 0 dB.
+- **Fades even in dB**: `fade_gain` from `mode_controller` is treated as progress; `fade_curve` maps it to a straight line in dB from -50 dB to 0 dB. A linear gain would still be at -6 dB halfway through a fade-out and drop off audibly at the end.
+- **Amplifier always starts muted**: `tas5825m_power_up()` sets DIG_VOL to mute before play, and `outputs` always sends the volume right after a power-up. The driver also refuses to boost: codes below 0x30 are written as 0x30.
+- **Drivers are pure C with injected I/O**: `tas5825m` gets I2C, PDN and delay as callbacks, so the power sequence and error handling are tested on the PC; the ESP-IDF glue in `src/` is a few lines. Precondition: I2S clocks run before power-up, so the player keeps I2S0 enabled and sends zeros when idle.
+- **Order of output changes**: music stops before the amplifier powers down, and starts only after power-up and volume. On any I2C error during power-up the driver pulls PDN low, so a half-started amplifier never stays on.
 - **Unplayable files** are skipped for the session (AUD-12); an empty or unreadable card never blocks the rest of Ambient (AUD-09).
 - **Hardware notes**: the LR7843 switch modules need at least 6 V on their power side, so the candle module switches the 12 V input of the 3 V buck. The microSD breakout runs from a second buck set to 5 V; its level shifter keeps SPI at 3.3 V.
