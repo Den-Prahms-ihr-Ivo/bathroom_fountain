@@ -36,8 +36,12 @@ New modules start as stubs that only compile, so their tests fail until you impl
 | `test_hue_sender` | 16 | LIGHT-02, NFR-09 | 2 |
 | `test_button` | 12 | BEH-03, BEH-04 | 2 |
 | `test_settings` | 17 | CLAP-12, NFR-10, NFR-15 | 2 |
+| `test_pcm_mix` | 10 | AUD-01 (mono downmix to the left channel) | 3 |
+| `test_amp_volume` | 10 | AUD-05, AUD-06, AUD-07 (TAS5825M volume register) | 3 |
 
 Suggested order for round 2: `mic_frontend` first (small, and the clap lab needs it), then `button`, `hue_sender`, `settings`, `playlist`.
+
+Round 3 (`pcm_mix`, `amp_volume`) is small and independent; either order works.
 
 The clap tests generate synthetic scenes (claps, echoes, reverb, rattles, footsteps, shower noise) with deterministic noise, so they run without a microphone. Real recordings from the bathroom tune the defaults: see `tools/README.md`.
 
