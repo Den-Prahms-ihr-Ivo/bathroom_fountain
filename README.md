@@ -38,10 +38,15 @@ New modules start as stubs that only compile, so their tests fail until you impl
 | `test_settings` | 17 | CLAP-12, NFR-10, NFR-15 | 2 |
 | `test_pcm_mix` | 10 | AUD-01 (mono downmix to the left channel) | 3 |
 | `test_amp_volume` | 10 | AUD-05, AUD-06, AUD-07 (TAS5825M volume register) | 3 |
+| `test_fade_curve` | 11 | AUD-06 (fades even in dB) | 4 |
+| `test_tas5825m` | 19 | AUD-05/06/07, amplifier power sequence and faults (fake I2C) | 4 |
+| `test_outputs` | 23 | BEH-05/06/07, AUD-05/06/07 (what to switch, order, retries) | 4 |
 
 Suggested order for round 2: `mic_frontend` first (small, and the clap lab needs it), then `button`, `hue_sender`, `settings`, `playlist`.
 
 Round 3 (`pcm_mix`, `amp_volume`) is small and independent; either order works.
+
+Round 4: `fade_curve` first, because `test_outputs` also uses it (and `amp_volume`); then `outputs` and `tas5825m` in either order. `test_tas5825m` brings its own fake board, so the driver runs on the PC.
 
 The clap tests generate synthetic scenes (claps, echoes, reverb, rattles, footsteps, shower noise) with deterministic noise, so they run without a microphone. Real recordings from the bathroom tune the defaults: see `tools/README.md`.
 
