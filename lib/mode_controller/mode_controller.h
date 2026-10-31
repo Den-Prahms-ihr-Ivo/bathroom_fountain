@@ -13,12 +13,17 @@
  * Start (BEH-02)    mode NORMAL, nothing transitioning, all outputs off,
  *                   amplifier disabled, fade_gain 0, no Hue command pending.
  *
- * Trigger           A clap and a button press are equivalent (BEH-03/04).
+ * Trigger           The button toggles both ways (BEH-04). A clap only
+ *                   enters Ambient (BEH-03): in Ambient it is ignored
+ *                   (returns false, changes nothing, issues no Hue command)
+ *                   unless cfg.clap_exits is true, in which case a clap and a
+ *                   button press are equivalent.
  *                   A trigger is accepted unless a transition is running or
  *                   less than cfg.lockout_ms has passed since the last
  *                   transition ended (BEH-08). An accepted trigger flips the
  *                   mode immediately and starts a transition of
- *                   cfg.transition_ms.
+ *                   cfg.transition_ms. An ignored trigger has no effect at all
+ *                   (it does not restart the lockout).
  *
  * Entering Ambient  (BEH-05) at the trigger: Hue command AMBIENT with
  *                   duration cfg.transition_ms; candles, fountain, amplifier
@@ -69,6 +74,7 @@ typedef enum {
 typedef struct {
     uint32_t transition_ms; /* BEH-05/06, AUD-06: must be 3000…5000   default 4000 */
     uint32_t lockout_ms;    /* BEH-08: after a transition ends         default 1000 */
+    bool clap_exits;        /* BEH-03: a clap also leaves Ambient      default false */
 } mode_config_t;
 
 typedef struct {

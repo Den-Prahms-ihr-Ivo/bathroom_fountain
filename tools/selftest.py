@@ -104,7 +104,7 @@ def check_lab() -> bool:
         if res.returncode == 3:
             print("   skipped: lib/mic_frontend or lib/clap_detector not implemented yet")
             return True
-        per_file = clap_lab.evaluate(recs, [clap_lab.to_words(r) for r in recs], {})
+        per_file = clap_lab.evaluate(recs, [clap_lab.to_words(r) for r in recs], clap_lab.SYNTH_SETTINGS)
         total, by_label = clap_lab.totals(per_file)
         for label, s in sorted(by_label.items()):
             print(f"   {label:22s} prompts {s.prompts:3d}  hits {s.hits:3d}  false {s.false:3d}")
