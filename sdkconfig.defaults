@@ -1,3 +1,32 @@
+# Applied when PlatformIO creates sdkconfig.<env> (devkit / louder). After
+# changing this file, delete sdkconfig.devkit and sdkconfig.louder so they are
+# created again from it.
+
 # Unit tests on the boards run inside app_main's task; the clap tests need
 # more than the default 3.5 KB of stack.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Flash: 8 MB, 3 MB app partition (partitions.csv)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Speed for the MP3 decoder
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Console on UART0 (DevKit port marked UART) and mirrored on the native USB
+# port; console_task reads commands from both.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# Long file names on the microSD card (otherwise 8.3 names only)
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# The Hue Bridge has a self-signed certificate: encrypt, but do not verify
+# the server certificate (home network only).
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y

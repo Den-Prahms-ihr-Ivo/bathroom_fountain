@@ -4,6 +4,50 @@ Double-clap controlled bathroom ambience on a Sonocotta Louder-ESP32-S3 Plus: Hu
 
 See `docs/ARCHITECTURE.md` for the task layout and module plan.
 
+## Firmware: first start
+
+The firmware in `src/` is complete for both boards. On the DevKit, LEDs stand in for the outputs, the amplifier driver only logs, and music plays "dry" (decoded and paced, no sound). On the Louder everything is real.
+
+**1. Build and flash.** Delete `sdkconfig.devkit` / `sdkconfig.louder` once, so they are created again from `sdkconfig.defaults` (bigger app partition, long file names on the SD card, Hue HTTPS settings). Then:
+
+```
+pio run -e devkit -t upload          # or: -e louder
+pio device monitor -e devkit --echo
+```
+
+**2. Wi-Fi** (2.4 GHz only). On the console:
+
+```
+set wifi_ssid YourNetwork
+set wifi_pass YourPassword
+```
+
+It reconnects at once; `status` shows the IP.
+
+**3. Hue Bridge.** Give the bridge a fixed address in your router, then:
+
+```
+set hue_host 192.168.1.50
+```
+
+Press the round link button on the bridge, then within 30 s hold the device button for 3 s (or type `hue pair`). The key is saved as `hue_key`.
+
+**4. Scenes.** Create a "normal" and an "ambient" scene in the Hue app (e.g. lights at 1 % for ambient). Then:
+
+```
+hue scenes                           # lists id, name and room
+set scene_normal  <id>
+set scene_ambient <id>
+hue ambient                          # test: recall it now
+hue normal
+```
+
+**5. Music.** FAT32 microSD card, MP3 files in the root folder. `status` shows how many were found; `rescan` after swapping the card; `next` skips a track.
+
+**6. Use it.** Double clap: Ambient. Button: back to Normal. Turning the knob changes the volume (saved after 2 s at rest). Ambient ends by itself after 30 minutes.
+
+Console commands: `help`, `status`, `show`, `get <key>`, `set <key> <value>`, `hue pair|scenes|normal|ambient`, `next`, `rescan`, `reboot`. Typing works on the UART port and on the native USB port.
+
 ## Environments
 
 | Env | Board | Use |
@@ -28,7 +72,7 @@ New modules start as stubs that only compile, so their tests fail until you impl
 | Suite | Tests | Covers | Round |
 | --- | --- | --- | --- |
 | `test_clap_detector` | 26 | CLAP-02 … CLAP-06, CLAP-13 | 1 (done) |
-| `test_mode_controller` | 17 | BEH-01 … BEH-09, AUD-06, AUD-07 | 1 (done) |
+| `test_mode_controller` | 31 | BEH-01 … BEH-10, AUD-06, AUD-07 (clap only enters Ambient; auto exit after 30 min) | 1, 5, 7 |
 | `test_volume` | 21 | AUD-05 | 1 (done) |
 | `test_hue_api` | 20 | LIGHT-01, LIGHT-02, NFR-09, NFR-10 | 1 (done) |
 | `test_mic_frontend` | 13 | CLAP-01, CLAP-14 | 2 |
@@ -58,5 +102,6 @@ The clap tests generate synthetic scenes (claps, echoes, reverb, rattles, footst
 | `tools/capture.py` | Live level meter, and labelled recordings with clap prompts (WAV + JSON) |
 | `tools/clap_lab.py` | Replays recordings through *your* `mic_frontend` + `clap_detector`, scores them, tunes settings, plots |
 | `tools/selftest.py` | Checks the capture protocol and the lab pipeline |
+| `tools/prompt_report.py` | Per prompt window: both clap peaks, level difference, gap, drop, and which default rule would reject the pair |
 
 Step-by-step for Monday: `tools/README.md`.

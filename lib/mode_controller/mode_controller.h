@@ -1,7 +1,7 @@
 /*
  * mode_controller – Normal/Ambient state machine (pure C, no hardware).
  *
- * Requirements: BEH-01 … BEH-09, AUD-06, AUD-07 (see the requirements doc).
+ * Requirements: BEH-01 … BEH-10, AUD-06, AUD-07 (see the requirements doc).
  * Tests:        test/test_mode_controller/
  *
  * Time is injected as a millisecond counter (e.g. esp_timer_get_time() / 1000
@@ -37,7 +37,17 @@
  *                   candles, fountain and music go off and the amplifier is
  *                   disabled (AUD-07).
  *
- * Hue commands      One command per accepted trigger, taken exactly once via
+ * Auto exit         (BEH-10) If cfg.max_ambient_ms is not 0, Ambient ends by
+ *                   itself cfg.max_ambient_ms after the trigger that entered
+ *                   it: at exactly that time a leaving transition starts, the
+ *                   same as an accepted button press (Hue command NORMAL,
+ *                   fade-out, outputs off at the end, lockout afterwards).
+ *                   The timer restarts with every entry and is cancelled by
+ *                   leaving earlier. Nothing extends it. If no call arrives at
+ *                   the deadline, the next call brings the state up to date
+ *                   as if the transition had started at the deadline.
+ *
+ * Hue commands      One command per accepted trigger or auto exit, taken exactly once via
  *                   mode_controller_take_hue_command(). If a command has not
  *                   been taken when the next one is issued, the newer one
  *                   replaces it. No commands are issued while a mode is
@@ -75,6 +85,7 @@ typedef struct {
     uint32_t transition_ms; /* BEH-05/06, AUD-06: must be 3000…5000   default 4000 */
     uint32_t lockout_ms;    /* BEH-08: after a transition ends         default 1000 */
     bool clap_exits;        /* BEH-03: a clap also leaves Ambient      default false */
+    uint32_t max_ambient_ms;/* BEH-10: 0 = off, else 60000…86400000   default 1800000 (30 min) */
 } mode_config_t;
 
 typedef struct {
@@ -97,7 +108,8 @@ typedef struct mode_controller mode_controller_t;
 /* Fill cfg with the defaults listed above. */
 void mode_config_default(mode_config_t *cfg);
 
-/* Returns NULL if cfg is NULL or invalid (transition_ms outside 3000…5000). */
+/* Returns NULL if cfg is NULL or invalid: transition_ms outside 3000…5000, or
+ * max_ambient_ms neither 0 nor within 60000…86400000 (1 min … 24 h). */
 mode_controller_t *mode_controller_create(const mode_config_t *cfg, uint32_t now_ms);
 
 /* Accepts NULL. */

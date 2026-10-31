@@ -1,5 +1,5 @@
 /*
- * Tests for lib/mode_controller – requirements BEH-01 … BEH-09, AUD-06, AUD-07.
+ * Tests for lib/mode_controller – requirements BEH-01 … BEH-10, AUD-06, AUD-07.
  *
  * BEH-03 (2026-10-31): a double clap only enters Ambient; leaving is by button
  * unless cfg.clap_exits is set. Tests that leave Ambient therefore use the button.
@@ -13,6 +13,7 @@
 #define T0          10000u /* arbitrary start time, ms */
 #define TICK_MS     20u
 #define GAIN_EPS    1e-6f
+#define MIN_MS      60000u
 
 static mode_config_t cfg;
 static mode_controller_t *mc;
@@ -96,6 +97,7 @@ static void test_defaults_match_requirements(void)
     TEST_ASSERT_EQUAL_UINT32(4000, d.transition_ms); /* BEH-05/06: 3–5 s */
     TEST_ASSERT_EQUAL_UINT32(1000, d.lockout_ms);    /* BEH-08 */
     TEST_ASSERT_FALSE_MESSAGE(d.clap_exits, "BEH-03: a clap does not leave Ambient by default");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(30u * MIN_MS, d.max_ambient_ms, "BEH-10: 30 min safety net");
 }
 
 static void test_create_enforces_transition_range(void)
@@ -121,6 +123,27 @@ static void test_create_enforces_transition_range(void)
     m = mode_controller_create(&c, T0);
     TEST_ASSERT_NOT_NULL_MESSAGE(m, "5000 ms is allowed");
     mode_controller_destroy(m);
+}
+
+static void test_create_enforces_max_ambient_range(void) /* BEH-10 */
+{
+    mode_config_t c = cfg;
+    const uint32_t ok[] = {0u, 60000u, 30u * MIN_MS, 86400000u};
+    const uint32_t bad[] = {1u, 4000u, 59999u, 86400001u, UINT32_MAX};
+    for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+        c.max_ambient_ms = ok[i];
+        mode_controller_t *m = mode_controller_create(&c, T0);
+        const bool created = (m != NULL);
+        mode_controller_destroy(m);
+        TEST_ASSERT_TRUE_MESSAGE(created, "valid max_ambient_ms rejected");
+    }
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        c.max_ambient_ms = bad[i];
+        mode_controller_t *m = mode_controller_create(&c, T0);
+        const bool created = (m != NULL);
+        mode_controller_destroy(m);
+        TEST_ASSERT_FALSE_MESSAGE(created, "invalid max_ambient_ms accepted");
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -272,7 +295,7 @@ static void test_clap_in_ambient_is_ignored(void) /* BEH-03 */
     const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
     assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
 
-    const uint32_t times[] = {end + cfg.lockout_ms, end + 60000u, end + 3600000u};
+    const uint32_t times[] = {end + cfg.lockout_ms, end + MIN_MS, end + 25u * MIN_MS}; /* before BEH-10 */
     uint32_t last = end;
     for (unsigned i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
         tick_until(last, times[i]);
@@ -363,7 +386,7 @@ static void test_holding_ambient_issues_no_hue_commands(void)
     const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
     assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
 
-    for (uint32_t t = end; t < end + 3600000u; t += 100) {
+    for (uint32_t t = end; (int32_t)(T0 + cfg.max_ambient_ms - t) > 0; t += 100) { /* until BEH-10 */
         mode_controller_tick(mc, t);
     }
     assert_no_hue();
@@ -372,6 +395,160 @@ static void test_holding_ambient_issues_no_hue_commands(void)
     TEST_ASSERT_TRUE(out()->fountain_on);
     TEST_ASSERT_TRUE(out()->music_playing);
     TEST_ASSERT_FLOAT_WITHIN(GAIN_EPS, 1.0f, out()->fade_gain);
+}
+
+/* ------------------------------------------------------------------------ */
+/* BEH-10: automatic exit                                                   */
+/* ------------------------------------------------------------------------ */
+
+static void test_ambient_ends_by_itself_after_max_duration(void)
+{
+    create_at(T0);
+    const uint32_t entry = T0 + 100;
+    const uint32_t deadline = entry + cfg.max_ambient_ms;
+    enter_ambient(entry, TRIGGER_CLAP);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
+
+    tick_until(entry + cfg.transition_ms, deadline - 1);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(AMBIENCE_AMBIENT, out()->mode, "still Ambient 1 ms before the deadline");
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_no_hue();
+
+    mode_controller_tick(mc, deadline);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_TRUE(out()->transitioning);
+    assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
+
+    float prev = out()->fade_gain;
+    for (uint32_t t = deadline + TICK_MS; t < deadline + cfg.transition_ms; t += TICK_MS) {
+        mode_controller_tick(mc, t);
+        TEST_ASSERT_TRUE_MESSAGE(out()->fade_gain <= prev, "fade-out must not increase");
+        TEST_ASSERT_TRUE_MESSAGE(out()->candles_on, "candles stay on during the fade");
+        TEST_ASSERT_TRUE_MESSAGE(out()->music_playing, "music plays during the fade");
+        prev = out()->fade_gain;
+    }
+    mode_controller_tick(mc, deadline + cfg.transition_ms);
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_all_off();
+    assert_no_hue();
+}
+
+static void test_auto_exit_starts_at_the_deadline_even_without_ticks(void)
+{
+    create_at(T0);
+    enter_ambient(T0, TRIGGER_CLAP);
+    const uint32_t deadline = T0 + cfg.max_ambient_ms;
+
+    mode_controller_tick(mc, deadline + cfg.transition_ms / 2); /* first call after a long silence */
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_TRUE_MESSAGE(out()->transitioning, "fade-out runs from the deadline, not from the late call");
+    TEST_ASSERT_TRUE(out()->fade_gain > 0.0f && out()->fade_gain < 1.0f);
+
+    mode_controller_tick(mc, deadline + cfg.transition_ms);
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_all_off();
+}
+
+static void test_auto_exit_completes_on_a_very_late_call(void)
+{
+    create_at(T0);
+    enter_ambient(T0, TRIGGER_CLAP);
+    mode_controller_tick(mc, T0 + cfg.max_ambient_ms + cfg.transition_ms + 10u * MIN_MS);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_all_off();
+}
+
+static void test_auto_exit_is_followed_by_the_lockout(void)
+{
+    create_at(T0);
+    enter_ambient(T0, TRIGGER_CLAP);
+    const uint32_t off = T0 + cfg.max_ambient_ms + cfg.transition_ms;
+    tick_until(T0 + cfg.transition_ms, off);
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_CLAP, off + cfg.lockout_ms - 1));
+    TEST_ASSERT_TRUE_MESSAGE(mode_controller_trigger(mc, TRIGGER_CLAP, off + cfg.lockout_ms),
+                             "a clap enters Ambient again after an auto exit");
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+}
+
+static void test_trigger_during_auto_exit_fade_is_ignored(void)
+{
+    create_at(T0);
+    enter_ambient(T0, TRIGGER_CLAP);
+    const uint32_t deadline = T0 + cfg.max_ambient_ms;
+    mode_controller_tick(mc, deadline);
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_BUTTON, deadline + 1000));
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_CLAP, deadline + 1000));
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+}
+
+static void test_leaving_early_cancels_the_auto_exit(void)
+{
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
+    const uint32_t t_exit = end + 10u * MIN_MS;
+    tick_until(end, t_exit);
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, t_exit));
+    assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
+
+    for (uint32_t t = t_exit; t < T0 + 3u * cfg.max_ambient_ms; t += 1000) {
+        mode_controller_tick(mc, t);
+    }
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_all_off();
+    assert_no_hue();
+}
+
+static void test_reentering_restarts_the_timer(void)
+{
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    const uint32_t t_exit = end + 10u * MIN_MS;
+    tick_until(end, t_exit);
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, t_exit));
+    const uint32_t t_again = t_exit + 10u * MIN_MS;
+    tick_until(t_exit, t_again);
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, t_again));
+
+    tick_until(t_again, T0 + cfg.max_ambient_ms + 1000);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(AMBIENCE_AMBIENT, out()->mode, "the first entry's deadline no longer applies");
+    TEST_ASSERT_FALSE(out()->transitioning);
+
+    tick_until(T0 + cfg.max_ambient_ms + 1000, t_again + cfg.max_ambient_ms - 1);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+    mode_controller_tick(mc, t_again + cfg.max_ambient_ms);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_TRUE(out()->transitioning);
+}
+
+static void test_zero_disables_the_auto_exit(void)
+{
+    cfg.max_ambient_ms = 0;
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
+    for (uint32_t t = end; t < end + 180u * MIN_MS; t += 1000) {
+        mode_controller_tick(mc, t);
+    }
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+    TEST_ASSERT_FALSE(out()->transitioning);
+    assert_no_hue();
+}
+
+static void test_auto_exit_across_millisecond_counter_wrap(void)
+{
+    cfg.max_ambient_ms = MIN_MS;
+    const uint32_t entry = UINT32_MAX - 30000u; /* deadline lies after the wrap */
+    create_at(entry);
+    enter_ambient(entry, TRIGGER_CLAP);
+    const uint32_t deadline = entry + cfg.max_ambient_ms; /* wrapped */
+    tick_until(entry + cfg.transition_ms, deadline - 1);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+    mode_controller_tick(mc, deadline);
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    TEST_ASSERT_TRUE(out()->transitioning);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -412,6 +589,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_defaults_match_requirements);
     RUN_TEST(test_create_enforces_transition_range);
+    RUN_TEST(test_create_enforces_max_ambient_range);
     RUN_TEST(test_starts_in_normal_with_everything_off);
     RUN_TEST(test_startup_ticks_change_nothing);
     RUN_TEST(test_clap_enters_ambient);
@@ -429,6 +607,15 @@ int main(void)
     RUN_TEST(test_trigger_without_ticks_finishes_previous_transition_first);
     RUN_TEST(test_newer_hue_command_replaces_untaken_one);
     RUN_TEST(test_holding_ambient_issues_no_hue_commands);
+    RUN_TEST(test_ambient_ends_by_itself_after_max_duration);
+    RUN_TEST(test_auto_exit_starts_at_the_deadline_even_without_ticks);
+    RUN_TEST(test_auto_exit_completes_on_a_very_late_call);
+    RUN_TEST(test_auto_exit_is_followed_by_the_lockout);
+    RUN_TEST(test_trigger_during_auto_exit_fade_is_ignored);
+    RUN_TEST(test_leaving_early_cancels_the_auto_exit);
+    RUN_TEST(test_reentering_restarts_the_timer);
+    RUN_TEST(test_zero_disables_the_auto_exit);
+    RUN_TEST(test_auto_exit_across_millisecond_counter_wrap);
     RUN_TEST(test_works_across_millisecond_counter_wrap);
     RUN_TEST(test_outputs_pointer_is_stable);
     return UNITY_END();

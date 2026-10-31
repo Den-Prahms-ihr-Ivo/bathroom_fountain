@@ -13,6 +13,8 @@
 
 #define TRANSITION_MIN_MS 3000u
 #define TRANSITION_MAX_MS 5000u
+#define MAX_AMBIENT_MIN_MS 60000u     /* 1 min */
+#define MAX_AMBIENT_MAX_MS 86400000u  /* 24 h  */
 
 struct mode_controller {
     mode_config_t cfg;
@@ -24,6 +26,9 @@ struct mode_controller {
     bool lockout_active;          /* a transition has ended and lockout may still run */
     uint32_t transition_end_ms;
 
+    bool auto_exit_armed;         /* BEH-10: Ambient entered, max_ambient_ms running */
+    uint32_t ambient_entry_ms;
+
     bool hue_pending;
     hue_command_t hue;
 };
@@ -34,6 +39,7 @@ void mode_config_default(mode_config_t *cfg)
         cfg->transition_ms = 4000;
         cfg->lockout_ms = 1000;
         cfg->clap_exits = false;
+        cfg->max_ambient_ms = 1800000; /* 30 min */
     }
 }
 
@@ -47,7 +53,7 @@ static void set_all_off(mode_outputs_t *o)
 }
 
 /* Bring fades, transition end and lockout up to date for now_ms. */
-static void update(mode_controller_t *mc, uint32_t now_ms)
+static void update_transition(mode_controller_t *mc, uint32_t now_ms)
 {
     if (mc->out.transitioning) {
         const uint32_t elapsed = now_ms - mc->transition_start_ms;
@@ -80,11 +86,58 @@ static void update(mode_controller_t *mc, uint32_t now_ms)
     }
 }
 
+/* Flip the mode at now_ms and start the transition, with its Hue command. */
+static void start_transition(mode_controller_t *mc, uint32_t now_ms)
+{
+    const bool entering = (mc->out.mode == AMBIENCE_NORMAL);
+
+    mc->out.mode = entering ? AMBIENCE_AMBIENT : AMBIENCE_NORMAL;
+    mc->out.transitioning = true;
+    mc->transition_start_ms = now_ms;
+    mc->transition_start_gain = mc->out.fade_gain;
+    mc->lockout_active = false;
+
+    if (entering) {
+        /* BEH-05: everything on at the trigger, music fades in from 0. */
+        mc->out.candles_on = true;
+        mc->out.fountain_on = true;
+        mc->out.amp_enabled = true;
+        mc->out.music_playing = true;
+    }
+
+    /* BEH-10: the timer restarts with every entry; leaving cancels it. */
+    mc->auto_exit_armed = entering && mc->cfg.max_ambient_ms != 0;
+    mc->ambient_entry_ms = now_ms;
+
+    /* A newer command replaces one that has not been taken yet. */
+    mc->hue.scene = entering ? HUE_SCENE_AMBIENT : HUE_SCENE_NORMAL;
+    mc->hue.duration_ms = mc->cfg.transition_ms;
+    mc->hue_pending = true;
+}
+
+static void update(mode_controller_t *mc, uint32_t now_ms)
+{
+    if (mc->auto_exit_armed) {
+        const uint32_t since_entry = now_ms - mc->ambient_entry_ms;
+        if ((int32_t)since_entry >= 0 && since_entry >= mc->cfg.max_ambient_ms) {
+            /* BEH-10: leave as if the call had come exactly at the deadline. */
+            const uint32_t deadline = mc->ambient_entry_ms + mc->cfg.max_ambient_ms;
+            update_transition(mc, deadline);
+            start_transition(mc, deadline);
+        }
+    }
+    update_transition(mc, now_ms);
+}
+
 mode_controller_t *mode_controller_create(const mode_config_t *cfg, uint32_t now_ms)
 {
     (void)now_ms;
 
     if (cfg == NULL || cfg->transition_ms < TRANSITION_MIN_MS || cfg->transition_ms > TRANSITION_MAX_MS) {
+        return NULL;
+    }
+    if (cfg->max_ambient_ms != 0
+        && (cfg->max_ambient_ms < MAX_AMBIENT_MIN_MS || cfg->max_ambient_ms > MAX_AMBIENT_MAX_MS)) {
         return NULL;
     }
 
@@ -121,23 +174,7 @@ bool mode_controller_trigger(mode_controller_t *mc, trigger_source_t source, uin
         return false; /* BEH-03: a clap only enters Ambient */
     }
 
-    mc->out.mode = entering ? AMBIENCE_AMBIENT : AMBIENCE_NORMAL;
-    mc->out.transitioning = true;
-    mc->transition_start_ms = now_ms;
-    mc->transition_start_gain = mc->out.fade_gain;
-
-    if (entering) {
-        /* BEH-05: everything on at the trigger, music fades in from 0. */
-        mc->out.candles_on = true;
-        mc->out.fountain_on = true;
-        mc->out.amp_enabled = true;
-        mc->out.music_playing = true;
-    }
-
-    /* A newer command replaces one that has not been taken yet. */
-    mc->hue.scene = entering ? HUE_SCENE_AMBIENT : HUE_SCENE_NORMAL;
-    mc->hue.duration_ms = mc->cfg.transition_ms;
-    mc->hue_pending = true;
+    start_transition(mc, now_ms);
     return true;
 }
 
