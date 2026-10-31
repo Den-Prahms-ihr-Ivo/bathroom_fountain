@@ -1,5 +1,8 @@
 /*
  * Tests for lib/mode_controller – requirements BEH-01 … BEH-09, AUD-06, AUD-07.
+ *
+ * BEH-03 (2026-10-31): a double clap only enters Ambient; leaving is by button
+ * unless cfg.clap_exits is set. Tests that leave Ambient therefore use the button.
  */
 #include <stdint.h>
 #include <string.h>
@@ -92,6 +95,7 @@ static void test_defaults_match_requirements(void)
     mode_config_default(&d);
     TEST_ASSERT_EQUAL_UINT32(4000, d.transition_ms); /* BEH-05/06: 3–5 s */
     TEST_ASSERT_EQUAL_UINT32(1000, d.lockout_ms);    /* BEH-08 */
+    TEST_ASSERT_FALSE_MESSAGE(d.clap_exits, "BEH-03: a clap does not leave Ambient by default");
 }
 
 static void test_create_enforces_transition_range(void)
@@ -219,11 +223,11 @@ static void test_trigger_ignored_until_lockout_has_passed(void)
     create_at(T0);
     const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
 
-    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms - 1));
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms - 1));
     TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
     TEST_ASSERT_FALSE(out()->transitioning);
 
-    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms));
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms));
     TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
 }
 
@@ -239,7 +243,7 @@ static void test_leaving_fades_out_then_switches_everything_off(void)
 
     const uint32_t t1 = end + 5000;
     tick_until(end, t1);
-    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, t1));
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, t1));
     TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
     TEST_ASSERT_TRUE(out()->transitioning);
     assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
@@ -262,12 +266,72 @@ static void test_leaving_fades_out_then_switches_everything_off(void)
     assert_all_off();
 }
 
-static void test_button_and_clap_are_interchangeable(void)
+static void test_clap_in_ambient_is_ignored(void) /* BEH-03 */
+{
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
+
+    const uint32_t times[] = {end + cfg.lockout_ms, end + 60000u, end + 3600000u};
+    uint32_t last = end;
+    for (unsigned i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
+        tick_until(last, times[i]);
+        last = times[i];
+        TEST_ASSERT_FALSE_MESSAGE(mode_controller_trigger(mc, TRIGGER_CLAP, times[i]),
+                                  "a clap must not leave Ambient");
+        TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+        TEST_ASSERT_FALSE(out()->transitioning);
+        TEST_ASSERT_TRUE(out()->candles_on);
+        TEST_ASSERT_TRUE(out()->fountain_on);
+        TEST_ASSERT_TRUE(out()->music_playing);
+        TEST_ASSERT_TRUE(out()->amp_enabled);
+        TEST_ASSERT_FLOAT_WITHIN(GAIN_EPS, 1.0f, out()->fade_gain);
+        assert_no_hue();
+    }
+}
+
+static void test_ignored_clap_does_not_delay_the_button(void) /* BEH-03, BEH-08 */
 {
     create_at(T0);
     const uint32_t end = enter_ambient(T0, TRIGGER_BUTTON);
+    const uint32_t t = end + cfg.lockout_ms;
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_CLAP, t));
+    TEST_ASSERT_TRUE_MESSAGE(mode_controller_trigger(mc, TRIGGER_BUTTON, t),
+                             "an ignored clap must not restart the lockout");
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+}
+
+static void test_button_leaves_ambient_entered_by_clap(void) /* BEH-04 */
+{
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms));
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
+}
+
+static void test_clap_enters_again_after_leaving(void) /* BEH-03 */
+{
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
+    const uint32_t t_exit = end + cfg.lockout_ms;
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, t_exit));
+    tick_until(t_exit, t_exit + cfg.transition_ms);
+    const uint32_t t_again = t_exit + cfg.transition_ms + cfg.lockout_ms;
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, t_again));
+    TEST_ASSERT_EQUAL_INT(AMBIENCE_AMBIENT, out()->mode);
+}
+
+static void test_clap_exits_when_enabled(void) /* BEH-03 option */
+{
+    cfg.clap_exits = true;
+    create_at(T0);
+    const uint32_t end = enter_ambient(T0, TRIGGER_BUTTON);
+    assert_take_hue(HUE_SCENE_AMBIENT, cfg.transition_ms);
     TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms));
     TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
+    assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
 }
 
 static void test_trigger_without_ticks_finishes_previous_transition_first(void)
@@ -275,7 +339,7 @@ static void test_trigger_without_ticks_finishes_previous_transition_first(void)
     create_at(T0);
     TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, T0));
     /* no ticks at all */
-    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, T0 + cfg.transition_ms + cfg.lockout_ms));
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, T0 + cfg.transition_ms + cfg.lockout_ms));
     TEST_ASSERT_EQUAL_INT(AMBIENCE_NORMAL, out()->mode);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, out()->fade_gain);
 }
@@ -289,7 +353,7 @@ static void test_newer_hue_command_replaces_untaken_one(void)
     create_at(T0);
     const uint32_t end = enter_ambient(T0, TRIGGER_CLAP);
     /* Ambient command deliberately not taken */
-    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms));
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms));
     assert_take_hue(HUE_SCENE_NORMAL, cfg.transition_ms);
 }
 
@@ -329,8 +393,8 @@ static void test_works_across_millisecond_counter_wrap(void)
     TEST_ASSERT_FALSE(out()->transitioning);
     TEST_ASSERT_FLOAT_WITHIN(GAIN_EPS, 1.0f, out()->fade_gain);
 
-    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms - 1));
-    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_CLAP, end + cfg.lockout_ms));
+    TEST_ASSERT_FALSE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms - 1));
+    TEST_ASSERT_TRUE(mode_controller_trigger(mc, TRIGGER_BUTTON, end + cfg.lockout_ms));
 }
 
 static void test_outputs_pointer_is_stable(void)
@@ -357,7 +421,11 @@ int main(void)
     RUN_TEST(test_trigger_ignored_during_transition);
     RUN_TEST(test_trigger_ignored_until_lockout_has_passed);
     RUN_TEST(test_leaving_fades_out_then_switches_everything_off);
-    RUN_TEST(test_button_and_clap_are_interchangeable);
+    RUN_TEST(test_clap_in_ambient_is_ignored);
+    RUN_TEST(test_ignored_clap_does_not_delay_the_button);
+    RUN_TEST(test_button_leaves_ambient_entered_by_clap);
+    RUN_TEST(test_clap_enters_again_after_leaving);
+    RUN_TEST(test_clap_exits_when_enabled);
     RUN_TEST(test_trigger_without_ticks_finishes_previous_transition_first);
     RUN_TEST(test_newer_hue_command_replaces_untaken_one);
     RUN_TEST(test_holding_ambient_issues_no_hue_commands);

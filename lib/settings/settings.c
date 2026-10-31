@@ -71,13 +71,13 @@ void settings_defaults(settings_t *s)
     s->volume_max = 32;
     s->clap_min_gap_ms = 150;
     s->clap_max_gap_ms = 600;
-    s->clap_level_diff_db = 6.0f;
+    s->clap_level_diff_db = 18.0f; /* tuned from recordings, 2026-10-31 */
     s->clap_quiet_before_ms = 300;
     s->clap_quiet_after_ms = 400;
     s->clap_gap_factor = 1.5f;
     s->clap_drop_db = 12.0f;
-    s->clap_onset_db = 12.0f;
-    s->clap_min_peak_dbfs = -40.0f;
+    s->clap_onset_db = 20.0f;      /* tuned: room echo no longer counts as an onset */
+    s->clap_min_peak_dbfs = -30.0f; /* tuned: speech stays below */
     s->mic_hp_hz = 20.0f;
     s->mic_shift = 16;
 }

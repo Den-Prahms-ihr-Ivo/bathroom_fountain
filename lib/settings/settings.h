@@ -26,13 +26,13 @@
  *   volume_max             uint    1–32                  32
  *   clap_min_gap_ms        uint    50–1000               150
  *   clap_max_gap_ms        uint    100–2000              600
- *   clap_level_diff_db     float   0–20                  6.0
+ *   clap_level_diff_db     float   0–20                  18.0  (tuned)
  *   clap_quiet_before_ms   uint    0–2000                300
  *   clap_quiet_after_ms    uint    0–2000                400
  *   clap_gap_factor        float   0–4                   1.5
  *   clap_drop_db           float   1–40                  12.0
- *   clap_onset_db          float   1–40                  12.0
- *   clap_min_peak_dbfs     float   -90–0                 -40.0
+ *   clap_onset_db          float   1–40                  20.0  (tuned)
+ *   clap_min_peak_dbfs     float   -90–0                 -30.0 (tuned)
  *   mic_hp_hz              float   0–1000                20.0
  *   mic_shift              uint    8–24                  16
  *

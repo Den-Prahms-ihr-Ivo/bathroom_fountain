@@ -38,10 +38,15 @@ import audiolib as al  # noqa: E402
 
 EXE = TOOLS / "build" / ("clap_replay.exe" if os.name == "nt" else "clap_replay")
 LIBS = ("clap_detector", "mic_frontend")
-DEFAULTS = {"clap_min_gap_ms": 150, "clap_max_gap_ms": 600, "clap_level_diff_db": 6.0,
+# The device's factory defaults: keep in step with settings_defaults() in lib/settings/settings.c.
+# Every run starts from these (not from clap_config_default()), so the lab measures what the device does.
+DEFAULTS = {"clap_min_gap_ms": 150, "clap_max_gap_ms": 600, "clap_level_diff_db": 18.0,
             "clap_quiet_before_ms": 300, "clap_quiet_after_ms": 400, "clap_gap_factor": 1.5, "clap_drop_db": 12.0,
-            "clap_onset_db": 12.0, "clap_min_peak_dbfs": -40.0, "mic_hp_hz": 20.0, "mic_shift": 16}
+            "clap_onset_db": 20.0, "clap_min_peak_dbfs": -30.0, "mic_hp_hz": 20.0, "mic_shift": 16}
 SETTING_KEYS = tuple(DEFAULTS)
+# clap_config_default(): the values the unit tests and the synthetic scenes are built on. The synthetic
+# shower scene puts claps only about 18 dB above the noise, so it needs these rather than the tuned DEFAULTS.
+SYNTH_SETTINGS = {"clap_level_diff_db": "6.0", "clap_onset_db": "12.0", "clap_min_peak_dbfs": "-40.0"}
 
 
 def changes_from_defaults(settings: dict[str, str]) -> int:
@@ -79,7 +84,9 @@ def to_words(rec: al.Recording) -> bytes:
 
 def run_harness(words: bytes, rate: int, settings: dict[str, str]) -> list[tuple[int, int, int]]:
     args = [str(EXE), "--rate", str(rate)]
-    for k, v in settings.items():
+    merged = {k: str(v) for k, v in DEFAULTS.items()}
+    merged.update(settings)
+    for k, v in merged.items():
         args += ["--set", f"{k}={v}"]
     res = subprocess.run(args, input=words, capture_output=True)
     if res.returncode == 3:
@@ -147,7 +154,10 @@ def cmd_synth(args) -> None:
     for p in paths:
         print(f"wrote {p}")
     print("\nThese are synthetic, made with the same model as the unit tests. They check the tooling and "
-          "your implementation end to end; real recordings are what count for tuning.")
+          "your implementation end to end; real recordings are what count for tuning.\n"
+          "Replay them with the detector's own defaults, which they are built for:\n"
+          "  python tools/clap_lab.py replay " + str(args.out) + " "
+          + " ".join(f"--set {k}={v}" for k, v in SYNTH_SETTINGS.items()))
 
 
 def cmd_replay(args) -> None:

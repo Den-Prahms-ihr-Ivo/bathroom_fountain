@@ -78,13 +78,13 @@ static void test_defaults(void)
     TEST_ASSERT_EQUAL_UINT8(32, s.volume_max);
     TEST_ASSERT_EQUAL_UINT16(150, s.clap_min_gap_ms);
     TEST_ASSERT_EQUAL_UINT16(600, s.clap_max_gap_ms);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 6.0f, s.clap_level_diff_db);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 18.0f, s.clap_level_diff_db); /* tuned 2026-10-31 */
     TEST_ASSERT_EQUAL_UINT16(300, s.clap_quiet_before_ms);
     TEST_ASSERT_EQUAL_UINT16(400, s.clap_quiet_after_ms);
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.5f, s.clap_gap_factor);
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 12.0f, s.clap_drop_db);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 12.0f, s.clap_onset_db);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -40.0f, s.clap_min_peak_dbfs);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 20.0f, s.clap_onset_db);      /* tuned 2026-10-31 */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -30.0f, s.clap_min_peak_dbfs); /* tuned 2026-10-31 */
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 20.0f, s.mic_hp_hz);
     TEST_ASSERT_EQUAL_UINT8(16, s.mic_shift);
     TEST_ASSERT_FALSE(settings_is_complete(&s));
@@ -268,8 +268,8 @@ static void test_format_numbers(void)
 {
     expect_format("transition_ms", false, "4000");
     expect_format("volume_max", false, "32");
-    expect_format("clap_onset_db", false, "12.0");
-    expect_format("clap_min_peak_dbfs", false, "-40.0");
+    expect_format("clap_onset_db", false, "20.0");
+    expect_format("clap_min_peak_dbfs", false, "-30.0");
     expect_format("clap_gap_factor", false, "1.5");
     expect_format("mic_shift", false, "16");
     set_ok("clap_level_diff_db", "1.25");
@@ -301,10 +301,10 @@ static void test_format_errors(void)
     TEST_ASSERT_FALSE(settings_format(&s, "nope", true, out, sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("", out);
     memset(out, 'Z', sizeof(out));
-    TEST_ASSERT_FALSE_MESSAGE(settings_format(&s, "clap_min_peak_dbfs", true, out, 5), "\"-40.0\" needs 6 bytes");
+    TEST_ASSERT_FALSE_MESSAGE(settings_format(&s, "clap_min_peak_dbfs", true, out, 5), "\"-30.0\" needs 6 bytes");
     TEST_ASSERT_EQUAL_STRING("", out);
     TEST_ASSERT_TRUE(settings_format(&s, "clap_min_peak_dbfs", true, out, 6));
-    TEST_ASSERT_EQUAL_STRING("-40.0", out);
+    TEST_ASSERT_EQUAL_STRING("-30.0", out);
 }
 
 static void test_round_trip_through_text(void) /* NVS persistence */

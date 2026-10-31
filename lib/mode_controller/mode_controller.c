@@ -33,6 +33,7 @@ void mode_config_default(mode_config_t *cfg)
     if (cfg != NULL) {
         cfg->transition_ms = 4000;
         cfg->lockout_ms = 1000;
+        cfg->clap_exits = false;
     }
 }
 
@@ -106,8 +107,6 @@ void mode_controller_destroy(mode_controller_t *mc)
 
 bool mode_controller_trigger(mode_controller_t *mc, trigger_source_t source, uint32_t now_ms)
 {
-    (void)source; /* clap and button are equivalent (BEH-03/04) */
-
     if (mc == NULL) {
         return false;
     }
@@ -118,6 +117,9 @@ bool mode_controller_trigger(mode_controller_t *mc, trigger_source_t source, uin
     }
 
     const bool entering = (mc->out.mode == AMBIENCE_NORMAL);
+    if (!entering && source == TRIGGER_CLAP && !mc->cfg.clap_exits) {
+        return false; /* BEH-03: a clap only enters Ambient */
+    }
 
     mc->out.mode = entering ? AMBIENCE_AMBIENT : AMBIENCE_NORMAL;
     mc->out.transitioning = true;
