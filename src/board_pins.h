@@ -1,12 +1,25 @@
 /*
- * GPIO plan for both boards. PROVISIONAL: confirm every pin against your
- * board's silkscreen and the Sonocotta schematic before soldering.
+ * GPIO plan for both boards.
  *
- * Louder-ESP32-S3 Plus: pins fixed by the board come from the Sonocotta
- * pinout (I2S 14/15/16, I2C 8/9, PDN 17 also appear in Sonocotta's ESPHome
- * configs). The free pins below are taken from the option headers that are
- * not fitted in this build (Ethernet, OLED, IR), so they are physically
- * reachable.
+ * Louder-ESP32-S3 Plus (Rev A/A1): the board has no general GPIO header. The
+ * free pins are reached through the option footprints that this build does
+ * not use (checked against Sonocotta's schematic and PCB, esp32-audio-dock
+ * repo, hardware/7-louder-esp32-plus):
+ *
+ *   LAN headers P1/P2 (2x female 1x6, for the W5500 module, not fitted)
+ *       P1: GND GND 11 12 10 6        P2: GND 3V3 3V3 NC 5 13
+ *       -> microSD (10/11/12/13 + 3V3/GND), candles 5, fountain 6
+ *   Mic footprint "L" (2x3 holes): GND VDD SD=39 LR(=GND) WS=40 CLK=41
+ *       -> INMP441
+ *   UART holes (3): GND 43(TX0) 44(RX0)
+ *       -> encoder push button 43 (via 1 kOhm), encoder A 44
+ *   RGB LED header H2 (3): 3V3 21 GND
+ *       -> encoder B 21, encoder supply
+ *
+ * Not usable: 47/48/38 only exist on the 30-pin 0.5 mm OLED FPC; 7 carries
+ * the fitted IR receiver (desolder it to get 7 back); 35-37 belong to PSRAM.
+ * Because 43/44 become GPIOs, the serial console on this board is the USB-C
+ * port only (console_task skips the UART reader, see UART0_PINS_ARE_GPIO).
  *
  * Code uses #ifdef on the optional pins: a board without PIN_AMP_I2S_BCLK
  * plays "dry" (decodes and paces, no audio out), a board without
@@ -37,23 +50,28 @@
 #define PIN_AMP_PWDN      17
 #define PIN_AMP_FAULT     18
 
-/* Rotary encoder on the OLED header (OLED not fitted) */
-#define PIN_ENC_A    47
-#define PIN_ENC_B    38
-#define PIN_ENC_SW   48
+/* Rotary encoder: UART holes + RGB header. GPIO43 is UART0 TX and drives
+ * high while the ROM boots, so the push button goes through ~1 kOhm to GND. */
+#define PIN_ENC_A    44  /* UART hole "RX"           */
+#define PIN_ENC_B    21  /* RGB LED header, data pin */
+#define PIN_ENC_SW   43  /* UART hole "TX", 1 kOhm   */
 
-/* LR7843 module trigger inputs */
-#define PIN_SW_CANDLES   7  /* IR header (IR receiver not fitted)  */
-#define PIN_SW_FOUNTAIN  6  /* Ethernet INT (module not fitted)    */
-#define PIN_SW_SPOT      5  /* Ethernet RST (module not fitted)    */
+/* LR7843 module trigger inputs (LAN headers) */
+#define PIN_SW_CANDLES   5  /* P2, LAN_RST */
+#define PIN_SW_FOUNTAIN  6  /* P1, LAN_INT */
+/* Spot: no free pin left. GPIO7 works once the IR receiver is desoldered:
+ * #define PIN_SW_SPOT 7 */
 
 /* Push button: the encoder's switch (and any extra key in parallel), to GND */
 #define PIN_BUTTON   PIN_ENC_SW
 
+/* 43/44 are used as GPIOs: no UART console input on this board (USB only). */
+#define UART0_PINS_ARE_GPIO 1
+
 #elif defined(BOARD_DEVKITC1)
 
 /* Bench prototype: LEDs (each with ~330 Ω to GND) stand in for the outputs.
- * Candles and fountain use the Louder's pins, so the code moves over unchanged. */
+ * (Pin numbers differ from the Louder; the code only uses the names.) */
 #define PIN_SW_CANDLES   7
 #define PIN_SW_FOUNTAIN  6
 #define PIN_LED_AMP      5  /* follows the amplifier's PDN (tas5825m stand-in) */

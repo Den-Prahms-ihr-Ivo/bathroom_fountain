@@ -29,7 +29,11 @@
 #include "player_task.h"
 #include "wifi.h"
 
-#if CONFIG_ESP_CONSOLE_UART
+#include "board_pins.h"
+
+/* On the Louder, UART0's pins 43/44 carry the encoder, so typing works on the
+ * USB-C port only. */
+#if CONFIG_ESP_CONSOLE_UART && !defined(UART0_PINS_ARE_GPIO)
 #define CONSOLE_UART       CONFIG_ESP_CONSOLE_UART_NUM
 #define HAVE_UART_CONSOLE  1
 #else

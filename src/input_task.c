@@ -54,6 +54,16 @@ static pcnt_unit_handle_t s_pcnt;
 
 static bool encoder_init(void)
 {
+    /* Plain GPIO inputs first: on the Louder, 44 starts out as UART0 RX. */
+    const gpio_config_t io = {
+        .pin_bit_mask = (1ULL << PIN_ENC_A) | (1ULL << PIN_ENC_B),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+
     const pcnt_unit_config_t unit_cfg = {
         .high_limit = ENC_PCNT_LIMIT,
         .low_limit = -ENC_PCNT_LIMIT,

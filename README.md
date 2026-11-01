@@ -46,7 +46,7 @@ hue normal
 
 **6. Use it.** Double clap: Ambient. Button: back to Normal. Turning the knob changes the volume (saved after 2 s at rest). Ambient ends by itself after 30 minutes.
 
-Console commands: `help`, `status`, `show`, `get <key>`, `set <key> <value>`, `hue pair|scenes|normal|ambient`, `next`, `rescan`, `reboot`. Typing works on the UART port and on the native USB port.
+Console commands: `help`, `status`, `show`, `get <key>`, `set <key> <value>`, `hue pair|scenes|normal|ambient`, `next`, `rescan`, `reboot`. Typing works on the native USB port (on the DevKit also on the UART port; on the Louder, UART0's pins 43/44 carry the encoder). Where the free Louder pins are: `src/board_pins.h` and sheet 2 of the wiring PDF.
 
 ## Environments
 
