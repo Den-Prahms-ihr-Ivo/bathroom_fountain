@@ -30,6 +30,12 @@
 #include "wifi.h"
 
 #include "board_pins.h"
+#include "driver/gpio.h"
+#include "input_task.h"
+#include "amp_io.h"
+#include "soc/gpio_periph.h"
+#include "soc/gpio_reg.h"
+#include "soc/io_mux_reg.h"
 
 /* On the Louder, UART0's pins 43/44 carry the encoder, so typing works on the
  * USB-C port only. */
@@ -100,7 +106,8 @@ static void cmd_help(void)
 {
     printf("settings:  set <key> <value> | get <key> | show\n"
            "device:    status | next | rescan | reboot\n"
-           "hue:       hue pair | hue scenes | hue normal | hue ambient\n");
+           "hue:       hue pair | hue scenes | hue normal | hue ambient\n"
+           "test:      io | io watch | io candles on|off | io fountain on|off | amp | amp play | amp tone on|off\n");
 }
 
 static void cmd_status(void)
@@ -161,6 +168,142 @@ static char *next_word(char *s, char **rest)
     return s;
 }
 
+
+/* ------------------------------------------------------------------- io --- */
+/* Diagnostics: what the chip really sees on the input pins, and direct control
+ * of the outputs (bypasses the mode controller until the next transition). */
+
+static void io_pin(const char *name, int pin)
+{
+    const uint32_t mux = REG_GET_FIELD(GPIO_PIN_MUX_REG[pin], MCU_SEL);
+    const uint32_t oe = (pin < 32) ? ((REG_READ(GPIO_ENABLE_REG) >> pin) & 1u)
+                                   : ((REG_READ(GPIO_ENABLE1_REG) >> (pin - 32)) & 1u);
+    printf("  %-9s GPIO %2d  level %d  mux %lu%s  %s\n", name, pin, gpio_get_level(pin), (unsigned long)mux,
+           mux == PIN_FUNC_GPIO ? " (GPIO)" : " (NOT GPIO)", oe ? "output ENABLED" : "input");
+}
+
+static void io_snapshot(void)
+{
+    io_pin("button", PIN_BUTTON);
+#ifdef PIN_ENC_A
+    io_pin("enc A", PIN_ENC_A);
+    io_pin("enc B", PIN_ENC_B);
+#endif
+    io_pin("candles", PIN_SW_CANDLES);
+    io_pin("fountain", PIN_SW_FOUNTAIN);
+    int count = 0;
+    if (input_encoder_raw(&count)) {
+        printf("  encoder count %d (4 per click)\n", count);
+    } else {
+        printf("  encoder: not running\n");
+    }
+}
+
+static void io_watch(void)
+{
+    printf("io watch: 15 s, prints every change (press the button, turn the knob)\n");
+    int last_b = -1, last_a = -1, last_bb = -1, last_c = 0x7fffffff;
+    for (int i = 0; i < 15000 / 20; i++) {
+        const int b = gpio_get_level(PIN_BUTTON);
+#ifdef PIN_ENC_A
+        const int a = gpio_get_level(PIN_ENC_A);
+        const int bb = gpio_get_level(PIN_ENC_B);
+#else
+        const int a = 0, bb = 0;
+#endif
+        int c = 0;
+        input_encoder_raw(&c);
+        if (b != last_b || a != last_a || bb != last_bb || c != last_c) {
+            printf("  %5d ms  button %d  A %d  B %d  count %d\n", i * 20, b, a, bb, c);
+            fflush(stdout);
+            last_b = b; last_a = a; last_bb = bb; last_c = c;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    printf("io watch: done\n");
+}
+
+static void cmd_io(char *rest)
+{
+    char *what = next_word(rest, &rest);
+    char *val = next_word(rest, &rest);
+    if (*what == '\0') {
+        io_snapshot();
+    } else if (strcmp(what, "watch") == 0) {
+        io_watch();
+    } else if ((strcmp(what, "candles") == 0 || strcmp(what, "fountain") == 0) &&
+               (strcmp(val, "on") == 0 || strcmp(val, "off") == 0)) {
+        const int pin = (what[0] == 'c') ? PIN_SW_CANDLES : PIN_SW_FOUNTAIN;
+        gpio_set_level(pin, strcmp(val, "on") == 0);
+        printf("%s %s (GPIO %d; test only, the next mode change overrides it)\n", what, val, pin);
+    } else {
+        printf("usage: io | io watch | io candles on|off | io fountain on|off\n");
+    }
+}
+
+
+/* ------------------------------------------------------------------ amp --- */
+/* Diagnostics: the TAS5825M's state as the chip reports it (book 0, page 0). */
+
+static void amp_reg(const char *name, uint8_t reg, const char *hint)
+{
+    uint8_t v = 0;
+    if (amp_io_read(reg, &v) == 0) {
+        printf("  0x%02X %-14s 0x%02X  %s\n", reg, name, v, hint);
+    } else {
+        printf("  0x%02X %-14s (read failed)\n", reg, name);
+    }
+}
+
+static void cmd_amp(char *rest)
+{
+    char *what = next_word(rest, &rest);
+    if (amp_io_address() == 0) {
+        printf("amplifier not found yet: enter Ambient once (button), then try again\n");
+        return;
+    }
+    if (strcmp(what, "play") == 0) {
+        /* Hi-Z, then play: what the driver does at power-up */
+        amp_io_write(0x00, 0);
+        amp_io_write(0x7F, 0);
+        amp_io_write(0x03, 0x02);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        amp_io_write(0x03, 0x03);
+        amp_io_write(0x78, 0x80);
+        printf("amp: Hi-Z -> play, faults cleared\n");
+    } else if (strcmp(what, "tone") == 0) {
+        char *val = next_word(rest, &rest);
+        const bool on = (strcmp(val, "off") != 0);
+        player_test_tone(on);
+        amp_io_write(0x00, 0);
+        amp_io_write(0x7F, 0);
+        amp_io_write(0x50, on ? 0x00 : 0x07); /* auto mute off while testing */
+        printf("test tone %s (1 kHz on L and R while music plays; auto mute %s)\n", on ? "ON" : "off",
+               on ? "off" : "back on");
+        return;
+    } else if (*what != '\0') {
+        printf("usage: amp | amp play | amp tone on|off\n");
+        return;
+    }
+    amp_io_write(0x00, 0);   /* page 0 */
+    amp_io_write(0x7F, 0);   /* book 0 */
+    printf("amplifier at I2C 0x%02X:\n", amp_io_address());
+    amp_reg("DEVICE_CTRL1", 0x02, "bit2 = PBTL");
+    amp_reg("DEVICE_CTRL2", 0x03, "bits1:0 3 = play, 2 = Hi-Z; bit3 = mute");
+    amp_reg("SAP_CTRL1", 0x33, "audio format / word length");
+    amp_reg("FS_MON", 0x37, "detected sample rate code (0 = none)");
+    amp_reg("BCK_MON", 0x38, "detected BCLK/FS ratio");
+    amp_reg("CLKDET_STATUS", 0x39, "clock problems, 0 = ok");
+    amp_reg("DIG_VOL", 0x4C, "0x30 = 0 dB, 0xFF = mute");
+    amp_reg("AGAIN", 0x54, "analog gain, 0 = full");
+    amp_reg("AUTO_MUTE", 0x50, "auto mute settings");
+    amp_reg("POWER_STATE", 0x68, "0 deep sleep, 1 sleep, 2 Hi-Z, 3 play");
+    amp_reg("CHAN_FAULT", 0x70, "0 = ok");
+    amp_reg("GLOBAL_FAULT1", 0x71, "bit2 = clock fault");
+    amp_reg("GLOBAL_FAULT2", 0x72, "0 = ok");
+    amp_reg("WARNING", 0x73, "0 = ok");
+}
+
 static void run_line(char *line)
 {
     char *rest = NULL;
@@ -199,6 +342,10 @@ static void run_line(char *line)
         fflush(stdout);
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
+    } else if (strcmp(cmd, "amp") == 0) {
+        cmd_amp(rest);
+    } else if (strcmp(cmd, "io") == 0) {
+        cmd_io(rest);
     } else if (strcmp(cmd, "help") == 0) {
         cmd_help();
     } else {

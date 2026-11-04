@@ -184,3 +184,13 @@ uint8_t amp_io_address(void)
     return 0;
 }
 #endif
+
+int amp_io_read(uint8_t reg, uint8_t *value)
+{
+    return s_io.read_reg(s_io.ctx, reg, value);
+}
+
+int amp_io_write(uint8_t reg, uint8_t value)
+{
+    return s_io.write_reg(s_io.ctx, reg, value);
+}

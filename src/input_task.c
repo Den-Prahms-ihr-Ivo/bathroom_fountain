@@ -175,6 +175,16 @@ static void input_task(void *arg)
     }
 }
 
+bool input_encoder_raw(int *count)
+{
+#if HAVE_ENCODER
+    return s_pcnt != NULL && pcnt_unit_get_count(s_pcnt, count) == ESP_OK;
+#else
+    (void)count;
+    return false;
+#endif
+}
+
 void input_task_start(void)
 {
     button_gpio_init();

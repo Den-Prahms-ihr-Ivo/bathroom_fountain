@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "driver/sdspi_host.h"
@@ -112,6 +113,10 @@ static void i2s_start(void)
         },
     };
     std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
+    /* The default ws_width is the sample width (16). With 32-bit slots the
+     * word-select line must switch every 32 BCLK, otherwise the amplifier gets
+     * a lopsided frame: it still locks to 48 kHz but reads silence. */
+    std_cfg.slot_cfg.ws_width = 32;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_tx));
 }
@@ -138,8 +143,35 @@ static void set_rate(uint32_t hz)
     s_dry_played_us = 0;
 }
 
+/* Diagnostics ("amp tone"): replaces the music with a 1 kHz sine on both
+ * channels, so the I2S -> amplifier -> speaker path can be tested on its own. */
+static volatile bool s_tone;
+static float s_tone_phase;
+
+void player_test_tone(bool on)
+{
+    s_tone = on;
+}
+
+static void tone_fill(int16_t *stereo, size_t frames)
+{
+    const float step = 2.0f * 3.14159265f * 1000.0f / (float)(s_rate ? s_rate : 48000u);
+    for (size_t i = 0; i < frames; i++) {
+        const int16_t v = (int16_t)(16000.0f * sinf(s_tone_phase)); /* about -6 dBFS */
+        stereo[2 * i] = v;
+        stereo[2 * i + 1] = v;
+        s_tone_phase += step;
+        if (s_tone_phase > 2.0f * 3.14159265f) {
+            s_tone_phase -= 2.0f * 3.14159265f;
+        }
+    }
+}
+
 static void output(const int16_t *stereo, size_t frames)
 {
+    if (s_tone) {
+        tone_fill((int16_t *)stereo, frames); /* our own output buffer */
+    }
 #if HAVE_I2S
     size_t written = 0;
     if (i2s_channel_write(s_tx, stereo, frames * 2u * sizeof(int16_t), &written, 1000) != ESP_OK) {

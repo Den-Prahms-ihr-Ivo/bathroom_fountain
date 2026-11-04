@@ -35,4 +35,8 @@ void player_next(void);
 /* Unmount and scan the card again (console "rescan"). */
 void player_rescan(void);
 
+/* Diagnostics: while playing, replace the music with a 1 kHz test tone on
+ * both channels (console "amp tone on|off"). */
+void player_test_tone(bool on);
+
 #endif /* PLAYER_TASK_H */

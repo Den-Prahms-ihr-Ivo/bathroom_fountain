@@ -17,7 +17,13 @@
 #ifndef INPUT_TASK_H
 #define INPUT_TASK_H
 
+#include <stdbool.h>
+
 /* Starts the task (core 1). events_init() must have run. */
 void input_task_start(void);
+
+/* Raw PCNT count of the encoder (4 per click on an EC11), for the console's
+ * "io" command. Returns false if the board has no encoder or it failed. */
+bool input_encoder_raw(int *count);
 
 #endif /* INPUT_TASK_H */

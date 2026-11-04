@@ -6,14 +6,15 @@
  * not use (checked against Sonocotta's schematic and PCB, esp32-audio-dock
  * repo, hardware/7-louder-esp32-plus):
  *
- *   LAN headers P1/P2 (2x female 1x6, for the W5500 module, not fitted)
+ *   LAN headers P1/P2 (2x female 1x6, for the W5500 module, not fitted;
+ *   P1 = row at the board edge, P2 = inner row, pin 1 = square pad)
  *       P1: GND GND 11 12 10 6        P2: GND 3V3 3V3 NC 5 13
  *       -> microSD (10/11/12/13 + 3V3/GND), candles 5, fountain 6
  *   Mic footprint "L" (2x3 holes): GND VDD SD=39 LR(=GND) WS=40 CLK=41
  *       -> INMP441
  *   UART holes (3): GND 43(TX0) 44(RX0)
  *       -> encoder push button 43 (via 1 kOhm), encoder A 44
- *   RGB LED header H2 (3): 3V3 21 GND
+ *   RGB LED header H2 (3): 3V3 (pin 1, square pad) GND 21
  *       -> encoder B 21, encoder supply
  *
  * Not usable: 47/48/38 only exist on the 30-pin 0.5 mm OLED FPC; 7 carries
