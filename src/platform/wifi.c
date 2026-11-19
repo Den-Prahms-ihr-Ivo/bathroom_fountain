@@ -107,7 +107,7 @@ static void apply_credentials(void)
     s_configured = (ssid[0] != '\0');
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     if (!s_configured) {
-        ESP_LOGW(TAG, "no network: fill in src/secrets.h, or 'set wifi_ssid <name>' and 'set wifi_pass <password>'");
+        ESP_LOGW(TAG, "no network: fill in src/platform/secrets.h, or 'set wifi_ssid <name>' and 'set wifi_pass <password>'");
     } else {
         ESP_LOGI(TAG, "network \"%s\" (%s)", ssid, from_console ? "console setting" : "secrets.h");
     }

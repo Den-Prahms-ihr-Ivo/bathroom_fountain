@@ -39,6 +39,7 @@ Thumbs.db
 # Claude Code: personal settings
 .claude/settings.local.json
 recordings/*
-src/secrets.h
+src/platform/secrets.h
 bathroom_ambient.zip
 src/secrets.h
+.vscode/

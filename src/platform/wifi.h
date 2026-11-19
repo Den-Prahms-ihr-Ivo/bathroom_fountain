@@ -2,7 +2,7 @@
  * wifi – station mode with the credentials from the settings (LIGHT-01).
  *
  * Network: the console setting wifi_ssid / wifi_pass if set, otherwise
- * WIFI_SSID / WIFI_PASSWORD from src/secrets.h (compiled in).
+ * WIFI_SSID / WIFI_PASSWORD from src/platform/secrets.h (compiled in).
  *
  *   wifi_start()      once at boot
  *   wifi_reconnect()  after "set wifi_ssid" / "set wifi_pass" on the console

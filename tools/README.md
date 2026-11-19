@@ -46,7 +46,7 @@ triggers. They prove the pipeline works; only real recordings say anything about
 pio run -d tools/recorder -t upload
 ```
 
-   This replaces the unit-test firmware on the DevKitC-1; `pio test -e devkit` flashes the tests again later.
+   This replaces the unit-test firmware on the DevKitC-1; `pio test -e bath_devkit` flashes the tests again later.
    Not verified: this firmware was written against the ESP-IDF 5.3 I2S API but could not be built before
    delivery. If it does not compile, send me the error.
 

@@ -1,18 +1,20 @@
 # bathroom-ambience
 
-Double-clap controlled bathroom ambience on a Sonocotta Louder-ESP32-S3 Plus: Hue scene, LED candles, music from microSD, fountain.
+Double-clap controlled bathroom ambience on a Sonocotta Louder-ESP32-S3 Plus: Hue scene, LED candles, music from microSD, fountain. From v2 the same codebase also builds the bedroom nodes (speaker, bedside) and the alarm-game nodes (gun, target).
 
-See `docs/ARCHITECTURE.md` for the task layout and module plan.
+- `docs/ARCHITECTURE.md`: nodes, layers, modules, how the pieces talk
+- `docs/PROTOCOL.md`: MQTT topics and payloads, ESP-NOW frames (shared with the server repository)
+- `docs/IMPLEMENTATION.pdf`: what to implement in which order
 
 ## Firmware: first start
 
-The firmware in `src/` is complete for both boards. On the DevKit, LEDs stand in for the outputs, the amplifier driver only logs, and music plays "dry" (decoded and paced, no sound). On the Louder everything is real.
+The bath firmware (`src/app/bath/` + `src/platform/`) is complete for both boards. On the DevKit, LEDs stand in for the outputs, the amplifier driver only logs, and music plays "dry" (decoded and paced, no sound). On the Louder everything is real.
 
-**1. Build and flash.** Delete `sdkconfig.devkit` / `sdkconfig.louder` once, so they are created again from `sdkconfig.defaults` (bigger app partition, long file names on the SD card, Hue HTTPS settings). Then:
+**1. Build and flash.** Delete `sdkconfig.bath_devkit` / `sdkconfig.bath` once, so they are created again from `sdkconfig.defaults` (bigger app partition, long file names on the SD card, Hue HTTPS settings). Then:
 
 ```
-pio run -e devkit -t upload          # or: -e louder
-pio device monitor -e devkit --echo
+pio run -e bath_devkit -t upload     # or: -e bath (the Louder)
+pio device monitor -e bath_devkit --echo
 ```
 
 **2. Wi-Fi** (2.4 GHz only). On the console:
@@ -46,15 +48,20 @@ hue normal
 
 **6. Use it.** Double clap: Ambient. Button: back to Normal. Turning the knob changes the volume (saved after 2 s at rest). Ambient ends by itself after 30 minutes.
 
-Console commands: `help`, `status`, `show`, `get <key>`, `set <key> <value>`, `hue pair|scenes|normal|ambient`, `next`, `rescan`, `reboot`. Typing works on the native USB port (on the DevKit also on the UART port; on the Louder, UART0's pins 43/44 carry the encoder). Where the free Louder pins are: `src/board_pins.h` and sheet 2 of the wiring PDF.
+Console commands: `help`, `status`, `show`, `get <key>`, `set <key> <value>`, `hue pair|scenes|normal|ambient`, `next`, `rescan`, `reboot`. Typing works on the native USB port (on the DevKit also on the UART port; on the Louder, UART0's pins 43/44 carry the encoder). Where the free Louder pins are: `src/app/bath/board_pins.h` and sheet 2 of the wiring PDF.
 
 ## Environments
 
 | Env | Board | Use |
 | --- | --- | --- |
 | `native` | your PC | unit tests for `lib/` |
-| `louder` | Louder-ESP32-S3 Plus | target firmware |
-| `devkit` | ESP32-S3-DevKitC-1 | bench prototyping (mic recorder, clap tuning) |
+| `bath` | Louder-ESP32-S3 Plus | bathroom firmware (was `louder`) |
+| `bath_devkit` | ESP32-S3-DevKitC-1 | bathroom firmware on the bench (was `devkit`) |
+| `bedroom_speaker` | Louder-ESP32-S3 Plus | bedroom speaker node (skeleton) |
+| `bedside` | ESP32-S3-DevKitC-1 | bedside node prototype (skeleton) |
+| `gun`, `target` | ESP32-C3-DevKitM-1 | alarm-game nodes (skeletons) |
+
+Each environment passes `-DAPP=<node>` to CMake; `src/CMakeLists.txt` then builds `src/app/<node>/` plus the platform files listed in that folder's `app.cmake`. The configure output prints `bathroom-ambience app: <node>`.
 
 ## Test-first workflow
 
@@ -63,7 +70,7 @@ pio test -e native                               # all suites
 pio test -e native -f test_clap_detector         # one suite
 ```
 
-New modules start as stubs that only compile, so their tests fail until you implement them.
+A new module starts as a stub that only compiles, so its tests fail until it is implemented. All suites below are green.
 
 1. Pick a module, read its header (the contract) and its test file.
 2. Implement `lib/<module>/<module>.c` until its suite is green.
@@ -86,11 +93,33 @@ New modules start as stubs that only compile, so their tests fail until you impl
 | `test_tas5825m` | 19 | AUD-05/06/07, amplifier power sequence and faults (fake I2C) | 4 |
 | `test_outputs` | 23 | BEH-05/06/07, AUD-05/06/07 (what to switch, order, retries) | 4 |
 
-Suggested order for round 2: `mic_frontend` first (small, and the clap lab needs it), then `button`, `hue_sender`, `settings`, `playlist`.
+v2 suites (implemented, green). Order and reasons: `docs/IMPLEMENTATION.pdf`.
 
-Round 3 (`pcm_mix`, `amp_volume`) is small and independent; either order works.
-
-Round 4: `fade_curve` first, because `test_outputs` also uses it (and `amp_volume`); then `outputs` and `tas5825m` in either order. `test_tas5825m` brings its own fake board, so the driver runs on the PC.
+| Suite | Tests | Covers | Phase |
+| --- | --- | --- | --- |
+| `test_kv_table` | 12 | CFG-01 … CFG-04 (engine for the setting groups) | P0 |
+| `test_alarm_schedule` | 9 | BED-01 … BED-04 (needed by `node_config`) | P0 / P6 |
+| `test_node_config` | 7 | CFG-05 … CFG-08, COLD-14, SRV-02, BED-05, GAME-10 | P0 |
+| `test_wav_clip` | 8 | COLD-09, COLD-12 | P1 |
+| `test_voice_mix` | 14 | COLD-10, COLD-11 | P1 |
+| `test_cold_protocol` | 14 | COLD-01 … COLD-08, COLD-13 | P1 |
+| `test_cold_session` | 10 | COLD-15 … COLD-17 | P1 |
+| `test_log_ring` | 9 | LOG-01 … LOG-04 | P2 |
+| `test_record_outbox` | 11 | COLD-18, COLD-19 | P2 |
+| `test_mqtt_topics` | 8 | SRV-03, SRV-04 | P2 |
+| `test_settings_sync` | 12 | SRV-05 … SRV-09 | P2 |
+| `test_clap_features` | 9 | CLAP-20 … CLAP-23 | P4 |
+| `test_tca9555` | 12 | HW-20, HW-21 | P5 |
+| `test_link_msg` | 12 | LINK-01 … LINK-04 | P6 |
+| `test_link_peer` | 14 | LINK-05 … LINK-09 | P6 |
+| `test_armed_alarm` | 14 | BED-10 … BED-16 | P6 |
+| `test_alarm_ring` | 15 | BED-20 … BED-28, GAME-01, GAME-08 | P6 |
+| `test_light_ramp` | 9 | BED-30 … BED-33 | P6 |
+| `test_pulse_code` | 10 | GAME-20 … GAME-23 | P7 |
+| `test_gun_logic` | 10 | GAME-30 … GAME-36 | P7 |
+| `test_target_logic` | 11 | GAME-40 … GAME-46 | P7 |
+| `test_game` | 18 | GAME-01 … GAME-09, GAME-11 … GAME-15 | P7 |
+| `test_crate_controller` | 15 | CRATE-01 … CRATE-10 (docs/CRATE.md) | crate |
 
 The clap tests generate synthetic scenes (claps, echoes, reverb, rattles, footsteps, shower noise) with deterministic noise, so they run without a microphone. Real recordings from the bathroom tune the defaults: see `tools/README.md`.
 

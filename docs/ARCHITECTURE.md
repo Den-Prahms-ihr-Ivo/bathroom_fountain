@@ -1,23 +1,162 @@
 # Architecture
 
-Requirement IDs (CLAP-02, BEH-05, …) refer to the "Bathroom Clap Ambience – System Requirements" doc.
+One codebase, one firmware per node, one server. This document describes v2: the bathroom node, the two bedroom nodes, the alarm-game nodes and the interface to the web app. The wire formats are in `docs/PROTOCOL.md`; the order of work is in `docs/IMPLEMENTATION.pdf`.
 
-## Two layers
+Requirement IDs (CLAP-02, COLD-05, BED-12, …) refer to the "Bathroom Clap Ambience – System Requirements" doc.
+
+## The system
+
+```
+                         Internet
+   browser ──HTTPS──▶  server (own VPS)                       separate repository
+                       Caddy · Node/TS API · Preact app · SQLite · Mosquitto
+                              ▲ MQTT over TLS, port 8883, devices dial out
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │                   home Wi-Fi
+   bath node            bedside node  ◀─ESP-NOW─▶  speaker node
+   Louder + carrier     ESP32-S3, RTC             Louder, SD card
+   Hue · music · cold   alarms · light · game     alarm sound, sleep sounds
+        │                     ▲ ESP-NOW
+        ▼                     ├──────────────┐
+   Hue bridge (LAN)         gun (C3)     targets (C3)          battery, no Wi-Fi
+```
+
+| Node | Build (`pio run -e …`) | Hardware | Role |
+| --- | --- | --- | --- |
+| bath | `bath`, `bath_devkit` | Louder-ESP32-S3 Plus, later carrier Rev A | v1 behaviour, cold-shower protocol, Hue, music |
+| bedroom speaker | `bedroom_speaker` | Louder-ESP32-S3 Plus, SD module, one button | plays sleep sounds and the alarm sound; holds the armed alarm copy |
+| bedside | `bedside` | ESP32-S3 (DevKit prototype, own PCB later), RTC | owns time and alarm schedule, sunrise light, buttons, game master |
+| gun | `gun` | ESP32-C3, laser, trigger | coded laser shots |
+| target | `target` | ESP32-C3, photodiode, LED ring | lights up, detects hits |
+
+The rule that shapes everything: **the server is for control and management, never for function.** Claps, the cold shower and the alarm work with the server, the internet or the other node gone.
+
+Three links, three jobs:
+
+| Link | Used for | Why this one |
+| --- | --- | --- |
+| MQTT over TLS, device → server | status, settings, commands, logs, OTA and music announcements | devices dial out, so nothing at home is exposed; one connection carries everything |
+| HTTPS, device → server | firmware images and music files (download only) | large files do not belong in MQTT |
+| ESP-NOW, node ↔ node | alarm copy, ring/snooze/stop, game commands and hits | works without router or internet, millisecond latency, battery nodes need no Wi-Fi |
+
+**Which nodes have their own server connection.** Bath, bedside and speaker each connect to the broker themselves: all three have Wi-Fi anyway (Hue, SNTP, music and OTA downloads), and a node that reports for itself keeps its status, logs and OTA when its partner is off. Only gun and targets have no Wi-Fi; the bedside node reports for them under `shower/<bedside>/node/<name>`. (The roadmap's topic table had the bedside bridged too; this replaces that row.) ESP-NOW and the Wi-Fi station share one radio and therefore one channel: bedside and speaker follow the router's channel, and gun and targets find the bedside node by trying the channels until a HELLO is answered.
+
+## Three layers
 
 | Layer | Where | Depends on | Tested by |
 | --- | --- | --- | --- |
-| Pure logic: decisions, signal processing, parsing | `lib/<module>/` | C standard library only | `pio test -e native` on your PC |
-| Drivers and tasks: I2S, GPIO, Wi-Fi, NVS, SD | `src/` | ESP-IDF | on the board |
+| Pure logic: decisions, signal processing, codecs | `lib/<module>/` | C standard library (two modules also cJSON) | `pio test -e native` on your PC |
+| Platform: drivers and services every node can use | `src/platform/` | ESP-IDF | on the board |
+| App: one node's tasks, pins and wiring of modules | `src/app/<node>/` | ESP-IDF, platform, lib | on the board |
 
-Everything that can be decided without hardware lives in `lib/` and is written test-first. The tasks in `src/` stay thin: they move data between peripherals and the pure modules.
+Everything that can be decided without hardware lives in `lib/` and is written test-first. Platform and app code stays thin: it moves data between peripherals and the pure modules.
 
-Rules for `lib/` modules:
+Rules for `lib/` modules (unchanged from v1):
 
 - No ESP-IDF headers. Time comes in as a parameter (`now_ms`), never from a clock.
 - Allocate once at create time; no allocation in processing paths.
 - Each module has one header that is its contract; the tests are written against that header only.
+- No node-specific behaviour: a module is told what to do through its config, it never asks which node it runs on.
 
-## Tasks (target firmware)
+### How one build picks its node
+
+`src/CMakeLists.txt` reads the CMake variable `APP` (PlatformIO passes `-DAPP=bath` through `board_build.cmake_extra_args`; without it the environment variable `BAS_APP`, then `bath`). It compiles every `.c` file in `src/app/<APP>/` plus the platform files that app lists in `src/app/<APP>/app.cmake`:
+
+```cmake
+# src/app/bath/app.cmake
+set(APP_PLATFORM_SRCS amp_io.c app_settings.c ... wifi.c)
+```
+
+So a node only links the platform code it names, a new node is a new folder, and nothing is switched with `#ifdef NODE_…`. The board (Louder or DevKit) is still chosen with `-DBOARD_…`, checked in the app's `board_pins.h`. The configure output prints `bathroom-ambience app: <name>`; that line is the proof the right app was picked.
+
+```
+src/
+  CMakeLists.txt            picks the app
+  platform/                 events, wifi, app_settings (NVS), app_status, console, hue_task,
+                            player_task, mp3_decoder, amp_io, mic_task, input_task
+                            new in v2: mqtt_link, log_capture, ota, music_sync, fallback_http,
+                                       espnow_link, expander_io, rtc, light_pwm
+  app/bath/                 main.c, control_task.c, board_pins.h, app.cmake
+  app/bedroom_speaker/      skeleton (main.c logs "nothing implemented yet")
+  app/bedside/              skeleton
+  app/gun/                  skeleton (ESP32-C3)
+  app/target/               skeleton (ESP32-C3)
+```
+
+## Library modules
+
+"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). All 515 are green.
+
+| Module | Used by | Job | State |
+| --- | --- | --- | --- |
+| `clap_detector`, `mic_frontend` | bath, bedside | double-clap detection | v1 |
+| `mode_controller`, `outputs`, `volume`, `amp_volume`, `fade_curve` | bath | Normal/Ambient, what to switch | v1 |
+| `button`, `playlist`, `pcm_mix`, `tas5825m` | bath, speaker | input, music, amplifier | v1 |
+| `hue_api`, `hue_sender` | bath, bedside | Hue bridge | v1 |
+| `settings` | every Wi-Fi node | the v1 keys (Wi-Fi, Hue, clap, mic) | v1 |
+| `kv_table` | every Wi-Fi node | engine for the v2 setting groups | v2 |
+| `node_config` | every Wi-Fi node | the groups `net`, `bath`, `bed`, `game` | v2 |
+| `settings_sync` | every Wi-Fi node | desired / reported settings as JSON | v2 |
+| `mqtt_topics` | every Wi-Fi node | topic strings | v2 |
+| `log_ring` | every Wi-Fi node | last log lines in RAM | v2 |
+| `wav_clip`, `voice_mix` | bath (speaker later) | voice clip over music, ducking | v2 |
+| `cold_protocol` | bath | the cold-shower sequence | v2 |
+| `cold_session` | bath | one run as a record: start, real phase lengths, how it ended | v2 |
+| `record_outbox` | every Wi-Fi node | records kept until the backend confirms them, also across reboots | v2 |
+| `crate_controller` | crate | lid, fades, sleep, battery (docs/CRATE.md) | v2 |
+| `clap_features` | bath, bedside | bright and abrupt, or dull and swelling? | v2 |
+| `tca9555` | bath | port expander on the carrier | v2 |
+| `link_msg`, `link_peer` | bedside, speaker, gun, target | ESP-NOW frames; acks, retries, liveness | v2 |
+| `alarm_schedule` | bedside | alarm text form, next ring time | v2 |
+| `alarm_ring` | bedside | sunrise → ring → snooze → off | v2 |
+| `light_ramp` | bedside | fades and gamma for the LED channels | v2 |
+| `armed_alarm` | speaker | rings from its own copy | v2 |
+| `game` | bedside | game master, self-test | v2 |
+| `pulse_code` | gun, target | the coded laser burst | v2 |
+| `gun_logic` | gun | trigger, magazine, sights, sleep | v2 |
+| `target_logic` | target | lit / hit / timeout, sleep plan | v2 |
+
+Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
+
+## Settings
+
+Three decisions:
+
+1. **Every setting is text key = value**, on every path: console, NVS, fallback page, MQTT. One validation, one format.
+2. **`lib/settings` stays as it is.** It holds the v1 keys with hand-written code and 17 green tests. Everything v2 adds is a *group*: a plain struct plus a const table, read and written by the generic engine `kv_table`. Groups are data, not code, so a new key is one table line and one test line. (The roadmap's P0 item "bool type in lib/settings" is covered by this: bools, choices and the new scene slots live in groups.)
+3. **Each node picks its groups.** Key names are unique across `lib/settings` and all groups (tested), so the name space stays flat.
+
+| Node | `settings` | `net` | `bath` | `bed` | `game` |
+| --- | --- | --- | --- | --- | --- |
+| bath | x | x | x | | |
+| bedroom speaker | x | x | | | |
+| bedside | x | x | | x | x |
+
+`src/platform/app_settings.c` becomes the *store*: it chains `lib/settings` and the node's groups behind four callbacks (`sync_store_t`), persists a changed key to NVS under its name and tells the tasks. Console, fallback page and `settings_sync` all go through the store. Gun and targets have no settings; the bedside sends them what they need (`LINK_GAME_CFG`).
+
+The two cold-shower profiles are two sets of nine keys (`hype_*`, `zen_*`) in the `bath` group; they replace the single `cold_*` set the roadmap listed before the hype/zen switch existed. Alarms are six text keys (`alarm1` … `alarm6`, e.g. `06:45,mtwtf--,on`), so they need no second mechanism.
+
+Server side: the server publishes the full desired set with a version; the device applies what passes validation, stores it and reports what it now holds, including a `rejected` list. Secrets never leave the device (reported as `********`). A local change shows up in the next report and the server adopts it. Details in `docs/PROTOCOL.md`.
+
+## Server link (platform)
+
+| Platform file | Job | Lib modules |
+| --- | --- | --- |
+| `mqtt_link.c` | esp-mqtt over TLS with the ESP-IDF certificate bundle; subscribes `settings/desired` and `cmd/#`; publishes status (retained, with last will "offline"), reported settings, events, logs; reconnect with backoff | `mqtt_topics`, `settings_sync` |
+| `log_capture.c` | `esp_log_set_vprintf` hook → `log_ring` (under a mutex) → publisher follows the ring by sequence number, drops below `log_level`, at most 10 lines/s; sends the reset reason at boot | `log_ring` |
+| `ota.c` | `cmd/ota` carries URL, version and SHA-256 → `esp_https_ota` into the other slot → reboot → confirm after Wi-Fi + broker are up, else roll back | – |
+| `music_sync.c` | `cmd/music/sync` carries a manifest; missing files are pulled over HTTPS in chunks into a temp name, renamed when complete; holds the card mutex per chunk, never while music needs it | – |
+| `fallback_http.c` | `http://<device_id>.local` on the LAN, PIN (`web_pin`): status, last log lines, Wi-Fi and server keys, firmware upload, restart. SoftAP `bas-setup-xxxx` when Wi-Fi fails for 2 minutes | `log_ring`, the store |
+
+OTA needs a new partition table (two app slots of 3 MB instead of one factory slot) and therefore one last USB flash; that step is in the implementation guide. Broker credentials (`mqtt_user`, `mqtt_pass`) are typed on the console or the fallback page and live in NVS only.
+
+Commands are handled by the app, not the platform: `mqtt_link` hands `(suffix, payload)` to a callback the app registers, and the app turns it into the same events its buttons produce. That keeps "what a command means" next to the mode logic.
+
+## Bath node
+
+Unchanged from v1 except for the additions marked v2.
+
+### Tasks
 
 | Task | Core | Priority | Job | Requirements |
 | --- | --- | --- | --- | --- |
@@ -31,7 +170,7 @@ Rules for `lib/` modules:
 
 Wi-Fi runs on core 0, so the real-time input and control work sits on core 1. The player sits on core 0 too: it decodes much faster than real time and ~90 ms of audio in the I2S DMA buffers cover Wi-Fi bursts.
 
-## Event flow
+### Event flow
 
 ```
 INMP441 ──I2S1──▶ mic_task ── clap_detector ──┐
@@ -63,15 +202,102 @@ for action in outputs_plan(want):                             // only what chang
 
 The amplifier register is therefore written only when the code changes, and a failed I2C write is retried on the next tick without extra code.
 
-## Modules
 
-| Module | Status | Contract |
+### v2 additions
+
+**Cold shower.** `control_task` gets a third mode beside Normal and Ambient. `cold_protocol` keeps the time; `control_task` is the glue:
+
+```
+cold button short, or cmd/cold/start
+  Normal:  mode_controller_trigger(BUTTON) must be accepted (not in lockout) → then cold_protocol_start()
+  Ambient: cold_protocol_start() directly
+each tick while the protocol runs:
+  cold_protocol_tick()
+  take_scene → hue_task: the profile's scene_warm / scene_cold / scene_after ("" → scene_ambient)
+               (a Hue command from mode_controller is dropped while the protocol runs)
+  take_cue   → player: voice clip (voice_mix_start) or beep
+  outputs.music → player folder: NONE = silence, HYPE = /B, CALM = /C (empty → /A)
+  take_end   → FINISHED or ABORTED: mode_controller_trigger(BUTTON) → Normal; ABORTED also voice_mix_stop()
+cold button short while running → cold_protocol_next();  held 2 s, or the main button → cold_protocol_abort()
+double clap while running → ignored
+```
+
+Candles, fountain, amplifier and the volume fade stay with `mode_controller` and `outputs`: for them the protocol is simply "Ambient". The profile is the hype/zen switch if `cold_switch` is on, else the `cold_profile` setting; a flip during a run goes to `cold_protocol_set_profile()` and applies at the next phase change.
+
+**Cold-shower log.** `control_task` runs a `cold_session` beside the protocol: `begin()` with a random id (`esp_random()`) and the SNTP time when the protocol starts, every change of `outputs.phase`, every `next`, and `end()` on `take_end`. A run that reached the cold phase gives a record; its JSON goes into the `record_outbox`, which is saved to NVS (one blob, key `outbox`) after every change. `mqtt_link` feeds the outbox its connection state, publishes what `take_due()` hands out as an event, and passes `cmd/ack` to `record_outbox_ack()`. The backend stores the row and acknowledges (docs/PROTOCOL.md, Records). Wi-Fi or server down only delays the record; nothing in the shower waits for it.
+
+**Voice layer.** At boot and after a music sync the player reads the first 512 bytes of the four clips in `/V` through `wav_clip` and keeps their lengths for `cold_protocol_start()`. `voice_mix_process()` sits between the MP3 decoder and `pcm_mix`; the clip is read from the SD card inside the mixer's callback, in the player task, under the card mutex the player already holds.
+
+**Clap gate.** `mic_task` keeps the last 100 ms of samples. When `clap_detector` confirms a double clap it runs `clap_features_measure()` on a window around each onset; both must pass `clap_features_is_clap()`. The features go into the clap event either way, so the thresholds can be tuned from the web app's event list before the gate is switched on.
+
+**Carrier Rev A.** `expander_io.c` owns the `tca9555` driver (I2C on GPIO 1/2, address 0x20) and polls it every 10 ms. Buttons get a *source*: a GPIO now, an expander bit on the carrier, so nothing above `input_task` changes. Pin plan (in `board_pins.h` when the carrier arrives): button port n has its switch on P0(8−2n) and its LED on P0(9−2n); P10 SD detect, P11 status LED; outputs mask `0x02AA`, inverted inputs `0x0155`.
+
+## Bedroom: bedside and speaker
+
+```
+bedside (master)                                   speaker (follower)
+  rtc + SNTP ─▶ local time                           armed_alarm ◀── LINK_TIME_ALARM (every change, every heartbeat)
+  alarm_schedule ─▶ next ring time                        │ rings by itself at the alarm time
+  alarm_ring: ARMED ▶ SUNRISE ▶ RINGING ⇄ SNOOZED         ▼
+     │ EV_SUNRISE ─▶ light_ramp ─▶ LEDC                player_task: alarm sound, fade-in, volume
+     │ EV_RING    ─▶ LINK_RING START ───────────────▶  (already ringing: ignored)
+     │ EV_SNOOZE  ─▶ LINK_RING SNOOZE ──────────────▶
+     │ EV_STOP    ─▶ LINK_RING STOP (acked, retried) ▶
+     ◀── LINK_RING_STATE (emergency button, timeout) ──  button on IO43, 3 s
+  game (if game_on) ⇄ gun, targets
+```
+
+**One owner, one armed copy.** Only the bedside has an RTC and only there is the schedule edited. The speaker never computes an alarm; it holds the next one as a versioned copy with the bedside's time, counts forward on its own clock and rings when the time comes. A link drop, a dead bedside or a reboot of either node before the alarm therefore still ends in a ringing speaker. The reverse safety nets: maximum ring time on both nodes, the speaker's emergency button, and a STOP that is accepted whatever its version says.
+
+**Time.** The bedside sets the system clock from the RTC at boot and from SNTP when Wi-Fi is up (and writes SNTP time back to the RTC). `alarm_schedule` works in local seconds; the app converts with the `tz` setting (`setenv("TZ")`, `localtime_r`, `mktime`), which also decides what happens inside a daylight-saving jump. After every settings change, every stop and at midnight the app asks `alarm_next()` again, arms `alarm_ring` with the milliseconds left and sends a new `LINK_TIME_ALARM` with a higher version.
+
+**Tasks.** Bedside: `input_task` (big button: short = snooze, long 1.5 s = off; armed switch as a level), `bed_task` (20 ms tick: alarm_ring, light_ramp, game, link), `hue_task`, `mqtt_link`, Wi-Fi, optional `mic_task`. Speaker: `player_task`, `speaker_task` (100 ms tick: armed_alarm, link, button), `mqtt_link`, Wi-Fi. The speaker's amplifier follows the v1 rule: powered down unless something plays.
+
+**Standby instead of a power switch.** A long press on the speaker's button stops playback and powers the amplifier down; the ESP32 stays up for the alarm. A speaker that is really switched off shows as "offline" on the bedside as soon as `link_peer` reports DOWN.
+
+## ESP-NOW link
+
+`espnow_link.c` (platform) owns the radio: it registers peers, encodes with `link_msg`, runs one `link_peer` per partner and hands decoded messages to the app. Pairing is by MAC address, learned from the first HELLO while the bedside is in pairing mode (button combination or `cmd/link/pair`) and stored in NVS; frames from unknown addresses are dropped. ESP-NOW encryption (PMK/LMK) is switched on once pairing works; the game and the alarm copy carry nothing secret, but a neighbour must not be able to stop or start an alarm.
+
+Reliability is the application's: a frame with `LINK_FLAG_ACK_REQ` is repeated every 60 ms up to five times until the peer's ACK arrives; the receiver acks duplicates but acts once. Heartbeats every 5 s; 15 s of silence is DOWN. All of this is `link_peer`, tested on the PC.
+
+## Alarm game
+
+```
+alarm_ring EV_RING (game required)
+   └▶ game_start(rules, targets alive, gun alive)
+         false → alarm_ring_game_unavailable()   buttons work, display says why
+         true  → LINK_TARGET_CMD LIGHT ─▶ target: LED ring on, target_logic LIT
+                     gun: trigger ─▶ gun_logic FIRE ─▶ pulse_code burst on the laser
+                     target: photodiode edges ─▶ pulse_decoder ─▶ target_logic_shot(strength)
+                 ◀── LINK_TARGET_EVT HIT / TIMEOUT ── game_on_hit / game_on_timeout
+         GAME_WON → alarm_ring_game_won() → LINK_RING STOP
+         a node drops out (link_peer DOWN) → game_on_target_lost / game_on_gun_lost
+                                             → GAME_UNAVAILABLE → alarm_ring_game_unavailable()
+```
+
+- **Never an alarm you can't stop:** the game can only add a requirement, and four things remove it again: winning, a missing node, the speaker's emergency button, the maximum ring time. Each is a tested path in `alarm_ring` and `game`.
+- **Coded light:** one trigger pull is one burst of about 20 ms with gun id, shot number and a check; a continuous beam, a lamp or a flash decodes to nothing. Hit zone = minimum signal strength behind the diffuser.
+- **Battery:** gun and targets are in deep sleep almost always. A target wakes on a timer (`target_sleep_seconds()`: until one minute before the alarm, at most 6 h), asks for `LINK_TIME_ALARM`, and sleeps again. The gun wakes on its tilt switch or trigger.
+- **Demo, self-test, status:** demo is `game_start()` without an alarm (`cmd/game/demo`, or holding the trigger 3 s); self-test is `game_start_selftest()`; battery and signal of gun and targets come from their heartbeats and are published under `node/<name>`.
+- **Later hardware without protocol changes:** a magazine (`LINK_CAP_MAGAZINE`, `gun_logic_magazine()`) and moving targets (`LINK_CAP_MOVING`) announce themselves in HELLO.
+
+## Server and web app (separate repository)
+
+The firmware's contract with the server is `docs/PROTOCOL.md`; copy that file into the server repository and change it in both places together. The stack that was decided:
+
+| Part | Choice | Job |
 | --- | --- | --- |
-| all `lib/` modules | Done, 252 native tests | `lib/<module>/<module>.h` |
-| `src/` tasks and drivers | Done; compiled for both boards with ESP-IDF 5.5 | see the task table |
-| `src/third_party/minimp3` | Vendored MP3 decoder (CC0) | `src/mp3_decoder.h` wraps it |
+| Reverse proxy | Caddy | HTTPS with automatic certificates, serves the built Preact app, proxies `/api` |
+| Broker | Mosquitto | port 8883 with TLS; one account per device, ACL `shower/<id>/#`; one account for the backend |
+| Backend | Node.js + TypeScript (Fastify, mqtt.js, better-sqlite3) | login and sessions, device registry, desired settings + versions, log and event store with retention, firmware and music library, WebSocket for live status and logs |
+| Frontend | Preact + TypeScript (Vite) | screens per node type |
+| Storage | SQLite + a files directory | no separate database server |
 
-## Design decisions to know about
+The browser talks only to the backend (REST + one WebSocket); the backend is the only MQTT client besides the devices. Screens: devices and status; bath (settings, both cold-shower profiles, scene slots filled from the published Hue scene list with a Test button, clap events with features); bedroom (alarms, sunrise, sleep sounds, game difficulty, node status, demo and self-test); logs (live, filter, download); music library; firmware. The key list each screen edits comes from the reported settings document, so a firmware with a new key shows up without a server change.
+
+
+## Design decisions of v1 (still valid for the bath node)
 
 - **Clap quiet windows scale with the gap** (CLAP-04): `max(300 ms, 1.5 × gap)` before, `max(400 ms, 1.5 × gap)` after. Fixed windows would accept two consecutive footsteps at normal walking pace (about 500 ms apart).
 - **Confirmation latency**: a double clap is reported only after the quiet-after window, so 400–900 ms after the second clap depending on the gap. NFR-06 allows 1.5 s.
