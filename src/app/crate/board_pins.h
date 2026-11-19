@@ -45,6 +45,12 @@
 #define PIN_ENC_B    21  /* RGB LED header, data pin */
 #define PIN_ENC_SW   43  /* UART hole "TX", 1 kOhm   */
 
+/* The encoder's push button is the node's button (input_task). */
+#define PIN_BUTTON   PIN_ENC_SW
+
+/* No Hue on the crate: input_task leaves out the long-press pairing. */
+#define INPUT_NO_HUE_PAIRING 1
+
 /* 43/44 are used as GPIOs: no UART console input on this board (USB only). */
 #define UART0_PINS_ARE_GPIO 1
 
