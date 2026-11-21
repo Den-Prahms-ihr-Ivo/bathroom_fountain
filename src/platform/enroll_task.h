@@ -59,6 +59,10 @@ enroll_state_t enroll_task_state(void);
 /* A copy of the net group. */
 void enroll_task_net(cfg_net_t *out);
 
+/* The net group itself, for server_link's settings store. Read and write it
+ * only under cfg_store_lock() (cfg_store_set does that). */
+cfg_net_t *enroll_task_net_data(void);
+
 /* Set one key of the net group (console, settings/desired). */
 kv_result_t enroll_task_net_set(const char *key, const char *value);
 

@@ -1,21 +1,25 @@
 /*
- * music_sync – cmd/music/sync (docs/PROTOCOL.md, Commands and HTTPS):
- * pull missing or changed files from the server onto the SD card, delete
- * files not listed, then publish an event "music".
+ * music_sync – cmd/music/sync (docs/PROTOCOL.md, Commands and HTTPS): make
+ * the SD card match the server's music library.
  *
- * SKELETON: the contract and the busy flag are real, the download is a TODO.
+ *   1. lib/sync_manifest parses the file list (invalid entries are skipped
+ *      and logged).
+ *   2. For every listed file: same size and same SHA-256 on the card -> kept.
+ *      Otherwise it is downloaded from base + path with HTTP basic auth
+ *      (mqtt_user / mqtt_pass) into "<path>.part"; an existing .part is
+ *      continued with a Range request. The finished file is verified
+ *      (size, SHA-256) and renamed into place. Two tries per file.
+ *   3. Audio files that are not listed are deleted: names ending in .mp3,
+ *      .wav or .part, in the card's root and in its root folders. Nothing
+ *      else on the card is ever touched.
+ *   4. Event {"type":"music","have":..,"missing":..,"free_mb":..}.
  *
- * TODO (in this order):
- *   1. parse {"base","files":[{"path","size","sha256"}]} (cJSON, max ~200
- *      files; refuse paths with ".." or a leading '/', and folders
- *      cfg_folder_valid() refuses);
- *   2. for each file: stat on the SD card; same size -> sha256 of the file
- *      (mbedtls) -> skip if equal; otherwise GET base+path with HTTP basic
- *      auth (mqtt_user / mqtt_pass), Range: bytes=<have>- into "<path>.part",
- *      verify sha256, rename;
- *   3. delete files that are not listed (only *.mp3 and *.part);
- *   4. player_rescan(); event {"type":"music","ok":..,"files":..,"bytes":..};
- *   5. stop the player while a file of the playing folder is replaced.
+ * The player keeps playing while files are downloaded. Before the first
+ * file is replaced or deleted it is held (player_hold), and released at the
+ * end, which rescans the card and continues the music (a new track).
+ *
+ * One sync at a time; a command during a sync is refused (event cmd,
+ * why "busy").
  */
 #ifndef MUSIC_SYNC_H
 #define MUSIC_SYNC_H
@@ -27,7 +31,8 @@
 extern "C" {
 #endif
 
-/* Start a sync with the command's payload (copied). false if one runs. */
+/* Start a sync with the command's payload (copied). false if one runs or
+ * there is no memory. */
 bool music_sync_start(const char *payload, size_t len);
 
 /* A sync is running (crate: crate_controller_busy keeps the closed crate awake). */

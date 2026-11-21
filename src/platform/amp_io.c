@@ -116,9 +116,11 @@ static const tas5825m_io_t s_io = {
     .delay_ms = real_delay,
 };
 
-const tas5825m_io_t *amp_io_get(void)
+static void bus_init(void)
 {
-    output_pin(PIN_AMP_PWDN); /* low: amplifier off until the driver says otherwise */
+    if (s_bus != NULL) {
+        return;
+    }
     const i2c_master_bus_config_t bus = {
         .i2c_port = I2C_NUM_0,
         .sda_io_num = PIN_AMP_I2C_SDA,
@@ -128,7 +130,19 @@ const tas5825m_io_t *amp_io_get(void)
         .flags.enable_internal_pullup = true,
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus, &s_bus));
+}
+
+const tas5825m_io_t *amp_io_get(void)
+{
+    output_pin(PIN_AMP_PWDN); /* low: amplifier off until the driver says otherwise */
+    bus_init();
     return &s_io;
+}
+
+void *amp_io_bus(void)
+{
+    bus_init(); /* the expander shares the amplifier's bus (expander_io.c) */
+    return s_bus;
 }
 
 uint8_t amp_io_address(void)
@@ -182,6 +196,11 @@ const tas5825m_io_t *amp_io_get(void)
 uint8_t amp_io_address(void)
 {
     return 0;
+}
+
+void *amp_io_bus(void)
+{
+    return NULL;
 }
 #endif
 

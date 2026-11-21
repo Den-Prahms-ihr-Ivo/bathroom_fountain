@@ -8,6 +8,7 @@ set(APP_PLATFORM_SRCS
     console_task.c
     enroll_task.c
     events.c
+    expander_io.c
     hue_task.c
     input_task.c
     mic_task.c
@@ -15,5 +16,6 @@ set(APP_PLATFORM_SRCS
     mqtt_link.c
     music_sync.c
     player_task.c
+    server_link.c
     wifi.c
 )

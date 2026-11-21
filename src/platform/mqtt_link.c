@@ -4,6 +4,7 @@
 #include "mqtt_link.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_crt_bundle.h"
@@ -17,6 +18,8 @@
 #include "settings_schema.h"
 
 #define MQTT_BUFFER     4096
+#define MQTT_OUT_BUFFER 8192            /* scene list, reported settings */
+#define MQTT_BIG_MAX    (64u * 1024u)   /* cmd/music/sync file lists arrive in pieces */
 #define MQTT_KEEPALIVE  30
 #define CMD_NAME_MAX    33
 
@@ -35,6 +38,10 @@ static struct {
     char uri[96];
     char user[33];
     char pass[65];
+    /* a message longer than MQTT_BUFFER comes in several DATA events */
+    char *big;
+    size_t big_len;
+    char big_topic[MQTT_TOPIC_MAX + 24];
 } s;
 
 /* ------------------------------------------------------------- helpers --- */
@@ -66,21 +73,55 @@ static void subscribe_all(void)
     }
 }
 
+static void dispatch(const char *topic, size_t topic_len, const char *data, size_t data_len);
+
+/* Messages longer than the buffer: collect the pieces (only the first carries
+ * the topic), then dispatch the whole message. */
 static void on_data(const esp_mqtt_event_handle_t ev)
 {
-    if (ev->current_data_offset != 0 || ev->data_len != ev->total_data_len) {
-        ESP_LOGW(TAG, "message over %d bytes dropped", MQTT_BUFFER);
+    if (ev->current_data_offset == 0 && ev->data_len == ev->total_data_len) {
+        dispatch(ev->topic, (size_t)ev->topic_len, ev->data, (size_t)ev->data_len);
         return;
     }
+    if (ev->current_data_offset == 0) {
+        free(s.big);
+        s.big = NULL;
+        if ((size_t)ev->total_data_len > MQTT_BIG_MAX || (size_t)ev->topic_len >= sizeof(s.big_topic)) {
+            ESP_LOGW(TAG, "message of %d bytes dropped", ev->total_data_len);
+            return;
+        }
+        s.big = malloc((size_t)ev->total_data_len + 1);
+        if (s.big == NULL) {
+            ESP_LOGW(TAG, "no memory for a %d byte message", ev->total_data_len);
+            return;
+        }
+        memcpy(s.big_topic, ev->topic, (size_t)ev->topic_len);
+        s.big_topic[ev->topic_len] = '\0';
+        s.big_len = (size_t)ev->total_data_len;
+    }
+    if (s.big == NULL || (size_t)ev->current_data_offset + (size_t)ev->data_len > s.big_len) {
+        return;
+    }
+    memcpy(s.big + ev->current_data_offset, ev->data, (size_t)ev->data_len);
+    if ((size_t)ev->current_data_offset + (size_t)ev->data_len == s.big_len) {
+        s.big[s.big_len] = '\0';
+        dispatch(s.big_topic, strlen(s.big_topic), s.big, s.big_len);
+        free(s.big);
+        s.big = NULL;
+    }
+}
+
+static void dispatch(const char *topic, size_t topic_len, const char *data, size_t data_len)
+{
     mqtt_topic_t kind;
     const char *suffix;
     size_t suffix_len;
-    if (!mqtt_topic_parse(ev->topic, (size_t)ev->topic_len, s.device_id, &kind, &suffix, &suffix_len)) {
+    if (!mqtt_topic_parse(topic, topic_len, s.device_id, &kind, &suffix, &suffix_len)) {
         return;
     }
     if (kind == MQTT_TOPIC_DESIRED) {
         if (s.hooks->on_desired != NULL) {
-            s.hooks->on_desired(ev->data, (size_t)ev->data_len);
+            s.hooks->on_desired(data, data_len);
         }
         return;
     }
@@ -96,7 +137,7 @@ static void on_data(const esp_mqtt_event_handle_t ev)
     } else if (strcmp(name, "restart") == 0) {
         esp_restart();
     } else if (s.hooks->on_cmd != NULL) {
-        s.hooks->on_cmd(name, ev->data, (size_t)ev->data_len);
+        s.hooks->on_cmd(name, data, data_len);
     }
 }
 
@@ -181,6 +222,7 @@ static void start_locked(void)
         .session.last_will.qos = 1,
         .session.last_will.retain = 1,
         .buffer.size = MQTT_BUFFER,
+        .buffer.out_size = MQTT_OUT_BUFFER,
     };
     s.client = esp_mqtt_client_init(&cfg);
     if (s.client == NULL) {

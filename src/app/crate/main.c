@@ -19,7 +19,8 @@
 #include "enroll_task.h"
 #include "events.h"
 #include "input_task.h"
-#include "mqtt_link.h"
+#include "server_link.h"
+#include "status_json.h"
 #include "music_sync.h"
 #include "node_config.h"
 #include "player_task.h"
@@ -40,36 +41,33 @@ static void nvs_start(void)
 
 /* ------------------------------------------------------------ server --- */
 
-static void on_connect(void)
+static size_t build_status(const status_common_t *c, char *out, size_t out_size)
 {
-    /* TODO: status_json_crate -> MQTT_TOPIC_STATUS (on connect, on change,
-     * every 60 s): state, light, playing, volume, battery, sd, tracks. */
+    status_crate_t cr;
+    crate_task_status(&cr);
+    cr.sd = player_sd_mounted() ? "ok" : "missing";
+    cr.tracks = player_folder_tracks(""); /* MP3s in the card's root */
+    return status_json_crate(c, &cr, out, out_size);
 }
 
-static void on_cmd(const char *name, const char *payload, size_t len)
+static bool on_cmd(const char *name, const char *payload, size_t len)
 {
     if (strcmp(name, "music/sync") == 0) {
         music_sync_start(payload, len); /* busy keeps the closed crate awake */
-        return;
+        return true;
     }
-    /* TODO: identify (pulse the strip), ota, log/verbose */
-    ESP_LOGI(TAG, "cmd/%s not handled yet", name);
+    return false; /* not yet: identify (pulse the strip), ota, log/verbose */
 }
 
-static void on_desired(const char *payload, size_t len)
-{
-    (void)payload;
-    (void)len;
-    /* TODO: lib/settings_sync -> net group */
-}
+static const char *const V1_KEYS[] = {"wifi_ssid", "wifi_pass", NULL};
 
-static const mqtt_link_hooks_t s_hooks = {
+static const server_app_t s_app = {
     .node = "crate",
-    .groups = {&cfg_net_table},
-    .group_count = 1,
-    .on_connect = on_connect,
+    .v1_settings = true,
+    .v1_keys = V1_KEYS,
+    .group_count = 0,
+    .build_status = build_status,
     .on_cmd = on_cmd,
-    .on_desired = on_desired,
 };
 
 void app_main(void)
@@ -81,7 +79,7 @@ void app_main(void)
     ESP_ERROR_CHECK(events_init() ? ESP_OK : ESP_ERR_NO_MEM);
     wifi_start();               /* online whenever awake */
     enroll_task_start("crate");
-    mqtt_link_start(&s_hooks);
+    server_link_start(&s_app);
     player_task_start();
     crate_task_start();   /* amplifier, light and lid before the encoder posts */
     input_task_start();

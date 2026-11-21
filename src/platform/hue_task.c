@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -33,15 +34,43 @@
 
 static const char *TAG = "hue";
 
-typedef enum { REQ_COMMAND, REQ_PAIR, REQ_LIST_SCENES } req_type_t;
+#define ID_MAX_ATTEMPTS  6       /* recall by id: 0.5 + 1 + 2 + 4 + 8 s of retries */
+#define SCENES_JSON_MAX  8192u   /* scene list document (MQTT out buffer is 8 KB) */
+#define CLOCK_VALID_AFTER 1767225600 /* 2026-01-01 */
+
+typedef enum { REQ_COMMAND, REQ_PAIR, REQ_LIST_SCENES, REQ_RECALL_ID, REQ_PUBLISH_SCENES } req_type_t;
 
 typedef struct {
     req_type_t type;
-    hue_command_t cmd;
+    hue_command_t cmd;        /* REQ_COMMAND   */
+    char id[HUE_SCENE_ID_LEN + 1]; /* REQ_RECALL_ID */
+    uint32_t duration_ms;     /* REQ_RECALL_ID */
 } req_t;
 
 static QueueHandle_t s_queue;
 static hue_sender_t *s_sender;
+static hue_scene_sink_t s_sink;
+
+/*
+ * Recall by id (bedside scenes, cold-shower scenes) runs beside hue_sender,
+ * which only knows AMBIENT / NORMAL. Order between the two: every request
+ * gets a sequence number; whichever was asked for last wins.
+ *   - a REQ_COMMAND drops an id recall that is still waiting;
+ *   - a hue_sender command polled after a newer id recall was asked for is
+ *     reported as done without sending it (it would undo the newer scene).
+ * hue_sender holds only the latest command, so one number for it is enough.
+ */
+static struct {
+    bool pending;
+    char id[HUE_SCENE_ID_LEN + 1];
+    uint32_t duration_ms;
+    uint32_t attempts;
+    uint32_t due_ms;
+    uint32_t seq;
+} s_id;
+static uint32_t s_seq;
+static uint32_t s_cmd_seq;    /* sequence of the command hue_sender holds */
+static uint32_t s_id_seq;     /* sequence of the latest id recall asked for */
 
 /* ------------------------------------------------------------- status --- */
 
@@ -211,6 +240,47 @@ static hue_result_t send_recall(const hue_command_t *cmd)
     return r;
 }
 
+/* One recall of a scene given by id. */
+static hue_result_t send_recall_id(const char *id, uint32_t duration_ms)
+{
+    settings_t st;
+    app_settings_snapshot(&st, NULL);
+    if (st.hue_host[0] == '\0') {
+        ESP_LOGW(TAG, "no bridge set: 'set hue_host <ip>'");
+        return HUE_ERR_TRANSPORT;
+    }
+    if (st.hue_key[0] == '\0') {
+        ESP_LOGW(TAG, "not paired (hue/pair, or 'hue pair' on the console)");
+        return HUE_ERR_AUTH;
+    }
+    hue_request_t req;
+    if (!hue_build_scene_recall(id, duration_ms, &req)) {
+        ESP_LOGW(TAG, "scene id '%s' is not valid", id);
+        return HUE_ERR_REJECTED;
+    }
+    char buf[HUE_RESP_MAX];
+    body_t resp = {.buf = buf, .size = sizeof(buf)};
+    const int status = https_request(st.hue_host, st.hue_key, req.method, req.path, req.body, &resp);
+    const hue_result_t r = hue_parse_response(status, buf, resp.len);
+    ESP_LOGI(TAG, "recall %s (%lu ms): HTTP %d, %s", id, (unsigned long)duration_ms, status, result_name(r));
+    return r;
+}
+
+static void run_id_recall(uint32_t now)
+{
+    if (!s_id.pending || (int32_t)(now - s_id.due_ms) < 0) {
+        return;
+    }
+    s_id.attempts++;
+    const hue_result_t r = send_recall_id(s_id.id, s_id.duration_ms);
+    publish(result_name(r));
+    if (r == HUE_OK || !hue_result_is_retryable(r) || s_id.attempts >= ID_MAX_ATTEMPTS) {
+        s_id.pending = false;
+        return;
+    }
+    s_id.due_ms = app_now_ms() + hue_retry_delay_ms(s_id.attempts);
+}
+
 static void do_pairing(void)
 {
     if (!wifi_wait_connected(5000)) {
@@ -286,12 +356,56 @@ typedef struct {
     char last_rid[37];
     char group_rid[37];
     bool have_cur;
-    /* mode: collecting groups, or printing scenes */
+    /* mode: collecting groups, or printing / collecting scenes */
     bool scenes;
+    bool print;             /* console listing                          */
+    char *json;             /* scene list document, or NULL             */
+    size_t json_len;
+    unsigned dropped;       /* scenes that did not fit the document     */
     named_t groups[MAX_GROUPS];
     size_t n_groups;
     unsigned printed;
 } scan_t;
+
+/* Append text to the document, JSON-escaped when esc. false if it is full. */
+static bool json_put(scan_t *s, const char *text, bool esc)
+{
+    for (const char *p = text; *p != '\0'; p++) {
+        char tmp[8];
+        const unsigned char c = (unsigned char)*p;
+        size_t n;
+        if (esc && (c == '"' || c == '\\')) {
+            tmp[0] = '\\';
+            tmp[1] = (char)c;
+            n = 2;
+        } else if (esc && c < 0x20) {
+            n = (size_t)snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+        } else {
+            tmp[0] = (char)c;
+            n = 1;
+        }
+        if (s->json_len + n + 3 > SCENES_JSON_MAX) { /* room for "]}" and NUL */
+            return false;
+        }
+        memcpy(s->json + s->json_len, tmp, n);
+        s->json_len += n;
+    }
+    s->json[s->json_len] = '\0';
+    return true;
+}
+
+static void json_scene(scan_t *s, const named_t *sc, const char *room)
+{
+    const size_t mark = s->json_len;
+    const bool ok = json_put(s, s->printed > 0 ? ",{\"id\":\"" : "{\"id\":\"", false) && json_put(s, sc->id, true) &&
+                    json_put(s, "\",\"name\":\"", false) && json_put(s, sc->name, true) &&
+                    json_put(s, "\",\"room\":\"", false) && json_put(s, room, true) && json_put(s, "\"}", false);
+    if (!ok) {
+        s->json_len = mark; /* drop the half-written entry */
+        s->json[mark] = '\0';
+        s->dropped++;
+    }
+}
 
 static bool tail_ends_with(const scan_t *s, const char *pat)
 {
@@ -316,7 +430,12 @@ static void scan_emit(scan_t *s)
         return;
     }
     if (s->scenes) {
-        printf("  %s  %-28s %s\n", s->cur.id, s->cur.name, group_name(s, s->group_rid));
+        if (s->print) {
+            printf("  %s  %-28s %s\n", s->cur.id, s->cur.name, group_name(s, s->group_rid));
+        }
+        if (s->json != NULL) {
+            json_scene(s, &s->cur, group_name(s, s->group_rid));
+        }
         s->printed++;
     } else if (s->n_groups < MAX_GROUPS) {
         s->groups[s->n_groups++] = s->cur;
@@ -397,35 +516,73 @@ static bool scan_get(scan_t *s, const settings_t *st, const char *path)
     const int status = https_request(st->hue_host, st->hue_key, "GET", path, NULL, &resp);
     scan_emit(s);
     if (status != 200) {
-        printf("GET %s: HTTP %d (%s)\n", path, status, status <= 0 ? "no connection" : "error");
+        if (s->print) {
+            printf("GET %s: HTTP %d (%s)\n", path, status, status <= 0 ? "no connection" : "error");
+        }
+        ESP_LOGW(TAG, "GET %s: HTTP %d", path, status);
         return false;
     }
     return true;
 }
 
-static void list_scenes(void)
+/* print: on the console; publish: as the scene list document to the sink
+ * (docs/PROTOCOL.md, Hue scenes). */
+static void list_scenes(bool print, bool publish_doc)
 {
     settings_t st;
     app_settings_snapshot(&st, NULL);
     if (!wifi_wait_connected(5000)) {
-        printf("no Wi-Fi\n");
+        if (print) {
+            printf("no Wi-Fi\n");
+        }
         return;
     }
     if (st.hue_host[0] == '\0' || st.hue_key[0] == '\0') {
-        printf("set hue_host and pair first\n");
+        if (print) {
+            printf("set hue_host and pair first\n");
+        }
         return;
+    }
+    if (publish_doc && s_sink == NULL) {
+        publish_doc = false;
     }
     scan_t *s = calloc(1, sizeof(*s));
     if (s == NULL) {
         return;
     }
-    if (scan_get(s, &st, "/clip/v2/resource/room") && scan_get(s, &st, "/clip/v2/resource/zone")) {
-        s->scenes = true;
-        printf("scenes (id, name, room):\n");
-        if (scan_get(s, &st, "/clip/v2/resource/scene")) {
-            printf("%u scenes. Use: set scene_normal <id> / set scene_ambient <id>\n", s->printed);
+    s->print = print;
+    if (publish_doc) {
+        s->json = malloc(SCENES_JSON_MAX);
+        if (s->json == NULL) {
+            free(s);
+            return;
+        }
+        const time_t t = time(NULL);
+        if (t >= CLOCK_VALID_AFTER) {
+            s->json_len = (size_t)snprintf(s->json, SCENES_JSON_MAX, "{\"t\":%lld,\"scenes\":[", (long long)t);
+        } else {
+            s->json_len = (size_t)snprintf(s->json, SCENES_JSON_MAX, "{\"scenes\":[");
         }
     }
+    if (scan_get(s, &st, "/clip/v2/resource/room") && scan_get(s, &st, "/clip/v2/resource/zone")) {
+        s->scenes = true;
+        if (print) {
+            printf("scenes (id, name, room):\n");
+        }
+        if (scan_get(s, &st, "/clip/v2/resource/scene")) {
+            if (print) {
+                printf("%u scenes. Use: set scene_normal <id> / set scene_ambient <id>\n", s->printed);
+            }
+            if (s->json != NULL) {
+                memcpy(s->json + s->json_len, "]}", 3);
+                if (s->dropped > 0) {
+                    ESP_LOGW(TAG, "scene list: %u scenes did not fit and were left out", s->dropped);
+                }
+                s_sink(s->json);
+            }
+        }
+    }
+    free(s->json);
     free(s);
 }
 
@@ -440,13 +597,27 @@ static void hue_task(void *arg)
         if (xQueueReceive(s_queue, &req, pdMS_TO_TICKS(HUE_LOOP_MS)) == pdTRUE) {
             switch (req.type) {
             case REQ_COMMAND:
+                s_cmd_seq = ++s_seq;
+                s_id.pending = false; /* newer than any waiting id recall */
                 hue_sender_submit(s_sender, &req.cmd, app_now_ms());
+                break;
+            case REQ_RECALL_ID:
+                s_id_seq = ++s_seq;
+                s_id.pending = true;
+                memcpy(s_id.id, req.id, sizeof(s_id.id));
+                s_id.duration_ms = req.duration_ms;
+                s_id.attempts = 0;
+                s_id.due_ms = app_now_ms();
                 break;
             case REQ_PAIR:
                 do_pairing();
+                list_scenes(false, true); /* a new key: the web app gets the scenes */
                 break;
             case REQ_LIST_SCENES:
-                list_scenes();
+                list_scenes(true, false);
+                break;
+            case REQ_PUBLISH_SCENES:
+                list_scenes(false, true);
                 break;
             }
             publish(NULL);
@@ -457,6 +628,13 @@ static void hue_task(void *arg)
         }
         hue_command_t cmd;
         if (hue_sender_poll(s_sender, app_now_ms(), &cmd)) {
+            if (s_cmd_seq < s_id_seq) {
+                /* an id recall was asked for after this command: it wins */
+                hue_sender_report(s_sender, HUE_OK, app_now_ms());
+                ESP_LOGI(TAG, "%s dropped: a newer scene was asked for",
+                         cmd.scene == HUE_SCENE_AMBIENT ? "AMBIENT" : "NORMAL");
+                continue;
+            }
             publish(NULL);
             const hue_result_t r = send_recall(&cmd);
             hue_sender_report(s_sender, r, app_now_ms());
@@ -465,6 +643,7 @@ static void hue_task(void *arg)
             }
             publish(result_name(r));
         }
+        run_id_recall(app_now_ms());
     }
 }
 
@@ -502,4 +681,47 @@ void hue_task_request_scene_list(void)
 {
     const req_t req = {.type = REQ_LIST_SCENES};
     post(&req);
+}
+
+void hue_task_recall_id(const char *scene_id, uint32_t duration_ms)
+{
+    if (scene_id == NULL || scene_id[0] == '\0') {
+        return;
+    }
+    req_t req = {.type = REQ_RECALL_ID, .duration_ms = duration_ms};
+    strlcpy(req.id, scene_id, sizeof(req.id));
+    post(&req);
+}
+
+void hue_task_publish_scenes(void)
+{
+    const req_t req = {.type = REQ_PUBLISH_SCENES};
+    post(&req);
+}
+
+void hue_task_set_scene_sink(hue_scene_sink_t sink)
+{
+    s_sink = sink;
+}
+
+const char *hue_task_health(void)
+{
+    if (s_sender == NULL) {
+        return "off";
+    }
+    settings_t st;
+    app_settings_snapshot(&st, NULL);
+    if (st.hue_host[0] == '\0') {
+        return "no_bridge";
+    }
+    if (st.hue_key[0] == '\0' || hue_sender_state(s_sender) == HUE_SENDER_NEEDS_PAIRING) {
+        return "unpaired";
+    }
+    switch (hue_sender_last_result(s_sender)) {
+    case HUE_OK: return "ok";
+    case HUE_ERR_TRANSPORT: return "unreachable";
+    case HUE_ERR_AUTH: return "unpaired";
+    case HUE_ERR_NOT_FOUND: return "scene_missing";
+    default: return "error";
+    }
 }

@@ -1,13 +1,14 @@
 /*
  * bedroom_speaker – bedroom speaker node (Louder-ESP32-S3 Plus): plays sleep sounds, music and the alarm; follower of the bedside node.
  *
- * Skeleton (v2.2/2.3 glue): LINK_AUDIO from the bedside -> speaker_session
- * -> player and amplifier; folder list to the bedside; pairing and MQTT.
- * Alarm sound and the folder / resume API of the player are TODO
- * (speaker_task.h).
+ * LINK_AUDIO from the bedside -> speaker_session -> player (folders, KEEP
+ * sessions with resume points) and amplifier; folder list to the bedside;
+ * pairing, status, settings and music sync over server_link. The alarm sound
+ * is not there yet (speaker_task.h).
  *
  * Tasks: speaker_task, player_task (microSD -> MP3 -> I2S), input_task
- * (button), espnow (link_peer), enroll (pairing), esp-mqtt, Wi-Fi.
+ * (button), espnow (link_peer), enroll (pairing), server_link + esp-mqtt,
+ * Wi-Fi, music_sync while a sync runs.
  */
 #include <string.h>
 
@@ -20,11 +21,11 @@
 #include "enroll_task.h"
 #include "events.h"
 #include "input_task.h"
-#include "mqtt_link.h"
 #include "music_sync.h"
-#include "node_config.h"
 #include "player_task.h"
+#include "server_link.h"
 #include "speaker_task.h"
+#include "status_json.h"
 #include "wifi.h"
 
 static const char *TAG = "bedroom_speaker";
@@ -39,35 +40,47 @@ static void nvs_start(void)
     ESP_ERROR_CHECK(err);
 }
 
-static void on_connect(void)
+static size_t build_status(const status_common_t *c, char *out, size_t out_size)
 {
-    /* TODO: status_json_speaker -> MQTT_TOPIC_STATUS (folders, playing, armed). */
+    static char folders[STATUS_MAX_FOLDERS][PLAYER_FOLDER_MAX + 1];
+    speaker_status_t st;
+    speaker_task_status(&st);
+    status_speaker_t sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.playing = st.playing;
+    sp.folder = st.folder;
+    sp.kept = st.kept;
+    sp.volume = st.volume;
+    sp.sd = player_sd_mounted() ? "ok" : "missing";
+    sp.folder_count = player_folders(folders, STATUS_MAX_FOLDERS);
+    for (size_t i = 0; i < sp.folder_count; i++) {
+        sp.folders[i] = folders[i];
+    }
+    sp.armed_state = "none"; /* with the alarm (Open items) */
+    sp.armed_version = 0;
+    sp.armed_alarm_utc = -1;
+    sp.link_up = st.link_up;
+    return status_json_speaker(c, &sp, out, out_size);
 }
 
-static void on_cmd(const char *name, const char *payload, size_t len)
+static bool on_cmd(const char *name, const char *payload, size_t len)
 {
     if (strcmp(name, "music/sync") == 0) {
-        music_sync_start(payload, len); /* TODO: then a new folder list to the bedside */
-        return;
+        music_sync_start(payload, len); /* the folder list follows when the card changed */
+        return true;
     }
-    /* TODO: identify, ota, log/verbose */
-    ESP_LOGI(TAG, "cmd/%s not handled yet", name);
+    return false; /* not yet: identify, ota, log/verbose */
 }
 
-static void on_desired(const char *payload, size_t len)
-{
-    (void)payload;
-    (void)len;
-    /* TODO: lib/settings_sync -> net group */
-}
+static const char *const V1_KEYS[] = {"wifi_ssid", "wifi_pass", NULL};
 
-static const mqtt_link_hooks_t s_hooks = {
+static const server_app_t s_app = {
     .node = "bedroom_speaker",
-    .groups = {&cfg_net_table},
-    .group_count = 1,
-    .on_connect = on_connect,
+    .v1_settings = true,
+    .v1_keys = V1_KEYS,
+    .group_count = 0,
+    .build_status = build_status,
     .on_cmd = on_cmd,
-    .on_desired = on_desired,
 };
 
 void app_main(void)
@@ -79,7 +92,7 @@ void app_main(void)
     ESP_ERROR_CHECK(events_init() ? ESP_OK : ESP_ERR_NO_MEM);
     wifi_start(); /* before ESP-NOW and the random secret */
     enroll_task_start("bedroom_speaker");
-    mqtt_link_start(&s_hooks);
+    server_link_start(&s_app);
     player_task_start();
     speaker_task_start();
     input_task_start(); /* button: short / 3 s */

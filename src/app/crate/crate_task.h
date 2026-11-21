@@ -6,7 +6,12 @@
 #ifndef CRATE_TASK_H
 #define CRATE_TASK_H
 
+#include "status_json.h"
+
 /* Call after events_init() and player_task_start(). */
 void crate_task_start(void);
+
+/* Snapshot for the status document (sd and tracks are filled by the caller). */
+void crate_task_status(status_crate_t *out);
 
 #endif /* CRATE_TASK_H */

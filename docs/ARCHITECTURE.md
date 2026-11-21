@@ -75,11 +75,13 @@ src/
   CMakeLists.txt            picks the app
   platform/                 events, wifi, app_settings (NVS), app_status, console, hue_task,
                             player_task, mp3_decoder, amp_io, mic_task, input_task
-                            new in v2: mqtt_link, log_capture, ota, music_sync, fallback_http,
-                                       espnow_link, expander_io, rtc, light_pwm
-  app/bath/                 main.c, control_task.c, board_pins.h, app.cmake
-  app/bedroom_speaker/      skeleton (main.c logs "nothing implemented yet")
-  app/bedside/              skeleton
+                            v2, working: cfg_store, enroll_task, mqtt_link, server_link,
+                                         music_sync, espnow_link, expander_io
+                            v2, not yet: log_capture, ota, fallback_http, rtc, light_pwm
+  app/bath/                 main.c, control_task.c (+ cold shower), board_pins.h, app.cmake
+  app/bedroom_speaker/      main.c, speaker_task.c (no alarm sound yet)
+  app/bedside/              main.c, bed_task.c (modes, buttons, candles; no alarm/display/game yet)
+  app/crate/                main.c, crate_task.c
   app/gun/                  skeleton (ESP32-C3)
   app/target/               skeleton (ESP32-C3)
 ```
@@ -155,16 +157,20 @@ Server side: the server publishes the full desired set with a version; the devic
 
 | Platform file | Job | Lib modules |
 | --- | --- | --- |
-| `mqtt_link.c` | esp-mqtt over TLS with the ESP-IDF certificate bundle; subscribes `settings/desired` and `cmd/#`; publishes status (retained, with last will "offline"), reported settings, events, logs; reconnect with backoff | `mqtt_topics`, `settings_sync` |
+| `mqtt_link.c` | esp-mqtt over TLS with the ESP-IDF certificate bundle; last will "offline"; subscribes `settings/desired` and `cmd/#`; publishes each group's schema on connect; `forget` and `restart` itself, other commands to `server_link`; joins messages longer than the 4 KB buffer (file lists up to 64 KB); "not authorised" → `enroll` | `mqtt_topics`, `settings_schema` |
+| `server_link.c` | above `mqtt_link`: status documents (on connect, ≤ every 2 s on change, every 60 s; common members filled here, node members from the app), settings sync over one chained store (v1 keys, or the app's subset of them; net; the app's groups), version in NVS, reported after every apply and every local change; record outbox (NVS) with `cmd/ack`; events; unknown commands answered with a `cmd` event; starts SNTP | `status_json`, `settings_sync`, `record_outbox` |
+| `cfg_store.c` | the v2 groups in NVS, one namespace per group (`g_<group>`), one text entry per key (15-character NVS key limit as in v1) | `kv_table`, `node_config` |
 | `log_capture.c` | `esp_log_set_vprintf` hook → `log_ring` (under a mutex) → publisher follows the ring by sequence number, drops below `log_level`, at most 10 lines/s; sends the reset reason at boot | `log_ring` |
 | `enroll_task.c` | pairing while unclaimed: HTTPS hello/confirm with `esp_http_client`, feeds `enroll`, writes or erases the five net keys, starts `mqtt_link` once claimed; the app passes its 3 s button hold in | `enroll`, `enroll_msg`, `node_config` |
 | `ota.c` | `cmd/ota` carries URL, version and SHA-256 → `esp_https_ota` into the other slot → reboot → confirm after Wi-Fi + broker are up, else roll back | – |
-| `music_sync.c` | `cmd/music/sync` carries a manifest; missing files are pulled over HTTPS in chunks into a temp name, renamed when complete; holds the card mutex per chunk, never while music needs it | – |
+| `music_sync.c` | `cmd/music/sync` carries a manifest; a file whose size and SHA-256 already match stays; others are pulled over HTTPS (basic auth with the broker account) into `<path>.part`, continued with `Range` after an interruption, verified, renamed into place; then not-listed `.mp3` / `.wav` / `.part` files in the root and its folders are deleted (nothing else is touched); event `music`. The player keeps playing during downloads and is held (`player_hold`) only for the first replace or delete; release rescans and continues | `sync_manifest` |
 | `fallback_http.c` | `http://<device_id>.local` on the LAN, PIN (`web_pin`): status, last log lines, Wi-Fi and server keys, firmware upload, restart. SoftAP `bas-setup-xxxx` when Wi-Fi fails for 2 minutes | `log_ring`, the store |
 
 OTA needs a new partition table (two app slots of 3 MB instead of one factory slot) and therefore one last USB flash; that step is in the implementation guide. Broker credentials (`mqtt_user`, `mqtt_pass`) are typed on the console or the fallback page and live in NVS only.
 
-Commands are handled by the app, not the platform: `mqtt_link` hands `(suffix, payload)` to a callback the app registers, and the app turns it into the same events its buttons produce. That keeps "what a command means" next to the mode logic.
+Commands are handled by the app, not the platform: `server_link` hands `(name, payload)` to a callback the app registers, and the app turns it into the same events its buttons produce (bath: `EVT_REMOTE`; bedside: `bed_task_press`). That keeps "what a command means" next to the mode logic. The callback runs in the MQTT task: it decides and posts, never waits.
+
+Who owns which settings struct: `enroll_task` the net group, `control_task` the bath group, `bed_task` the bed group, the bedside's `main.c` the game group. Each hands a pointer to `server_link`, whose store writes it with `cfg_store_set` under `cfg_store_lock`; readers copy the struct under the same lock. What a changed value does: Wi-Fi keys reconnect Wi-Fi, `mqtt_*` keys reconnect MQTT, the bath group is read at every cold-shower start (`clap_exits` after a reboot), the bed group's folders and scenes at every use and its timers and time zone when no mode runs.
 
 ## Bath node
 
@@ -175,12 +181,14 @@ Unchanged from v1 except for the additions marked v2.
 | Task | Core | Priority | Job | Requirements |
 | --- | --- | --- | --- | --- |
 | `mic_task` | 1 | 10 | Read I2S1 (INMP441, 16 kHz) → `mic_frontend` → `clap_detector`, post `EVT_CLAP`; 1 s + 5 s warm-up | CLAP-01, CLAP-14, NFR-01, BEH-02 |
-| `input_task` | 1 | 6 | Every 10 ms: push switch via `button` (short → `EVT_BUTTON`, long → Hue pairing), encoder via PCNT → `EVT_VOLUME` | BEH-04, AUD-05, NFR-10 |
+| `input_task` | 1 | 6 | Every 10 ms: push switch via `button` (short → `EVT_BUTTON`, 3 s → `EVT_LONG_PRESS`: server pairing while a confirm window is open, else Hue pairing), encoder via PCNT → `EVT_VOLUME` | BEH-04, AUD-05, NFR-10 |
+| `expander_io` | – | 6 | v2: every 10 ms the TCA9555: cold button → `EVT_COLD_PRESS` / `EVT_COLD_HOLD`, hype/zen switch → `EVT_COLD_SWITCH`, cold LED | COLD-* |
 | `control_task` | 1 | 5 | Own `mode_controller`, `volume`, `outputs` and the `tas5825m` driver; tick every 20 ms; carry out the actions `outputs` plans; poll amplifier faults every 2 s | BEH-*, AUD-05/06/07 |
 | `player_task` | 0 | 7 | microSD → `playlist` (shuffle) → MP3 (minimp3) → `pcm_mix` (mono, left) → I2S0 → TAS5825M; I2S sends zeros when idle | AUD-01/02/03/09/12 |
 | `hue_task` | 0 | 4 | `hue_sender` decides what to send; `hue_api` builds and parses; keep-alive HTTPS to the bridge; pairing; scene list | LIGHT-01/02, NFR-07/09/10 |
 | `console_task` | 0 | 2 | `set` / `get` / `show` through `settings` (NVS), `status`, `hue …`, `next`, `rescan`, `reboot`; reads the UART and the native USB port | CLAP-12, NFR-10, NFR-15 |
 | Wi-Fi | 0 | (IDF) | `wifi.c`: station from the settings, reconnect 1 s doubling to 30 s | LIGHT-01 |
+| `enroll`, `server`, esp-mqtt | – | 3 | v2: pairing, status / settings / records (`server_link`), MQTT; `music_sync` while a sync runs (priority 2) | SRV-* |
 
 Wi-Fi runs on core 0, so the real-time input and control work sits on core 1. The player sits on core 0 too: it decodes much faster than real time and ~90 ms of audio in the I2S DMA buffers cover Wi-Fi bursts.
 
@@ -242,7 +250,11 @@ Candles, fountain, amplifier and the volume fade stay with `mode_controller` and
 
 **Voice layer.** At boot and after a music sync the player reads the first 512 bytes of the four clips in `/V` through `wav_clip` and keeps their lengths for `cold_protocol_start()`. `voice_mix_process()` sits between the MP3 decoder and `pcm_mix`; the clip is read from the SD card inside the mixer's callback, in the player task, under the card mutex the player already holds.
 
-**Volume per mode (AUD-13/14).** `control_task` replaces its one `volume_t` with a `mode_volume_t` of `BATH_VOL_COUNT` slots. `bath_volume_mode()` says which slot the encoder sets (cold run, Ambient or its fade-out, or none in Normal) and `bath_volume_key()` its NVS key (`volume` for Ambient, so the saved level carries over; `vol_cold`). The amplifier gain uses `mode_volume_gain()` of the same slot. `mode_volume_take_save()` in a loop until it returns false. Until `bath_volume` is implemented, the bath keeps its single volume.
+**Cold-shower inputs (port expander).** The cold button and the hype/zen switch sit on a TCA9555 (`lib/tca9555`, `expander_io.c`). On the Louder it shares the amplifier's I2C bus (GPIO 8/9, address 0x20; the TAS5825M is at 0x4C–0x4F), `amp_io_bus()` hands out the bus. Carrier Rev A moves it to GPIO 1/2; only `board_pins.h` changes. Pin plan as below (Carrier Rev A): cold button P06 with its LED P07 (on during a run), hype/zen switch P04 (closed = hype) with its LED P05; P10 card detect and P11 status LED reserved. `expander_io` polls every 10 ms: short press → `EVT_COLD_PRESS` (start, or next during a run), held 2 s → `EVT_COLD_HOLD` (abort), switch → `EVT_COLD_SWITCH`. Without the chip the bath runs as before and the cold shower is started from the web app (`cmd/cold/start`) with the `cold_profile` setting. Console: `cold start|next|abort`, `voice 0..3`, `beep`.
+
+**Music folders on the bath card.** `A` Ambient (a v1 card with MP3s in the root keeps working: an empty or missing `A` falls back to the root), `B` hype, `C` calm (empty → `A`), `V` the four voice clips `go.wav`, `20s_left.wav`, `turn_to_cold.wav`, `done.wav` (16-bit mono PCM; a missing clip becomes a beep). `control_task` asks the player for a folder only when what should play changes, so the `A` playlist continues its shuffle round from one Ambient to the next.
+
+**Volume per mode (AUD-13/14).** `control_task` replaces its one `volume_t` with a `mode_volume_t` of `BATH_VOL_COUNT` slots. `bath_volume_mode()` says which slot the encoder sets (cold run, Ambient or its fade-out, or none in Normal) and `bath_volume_key()` its NVS key (`volume` for Ambient, so the saved level carries over; `vol_cold`). The amplifier gain uses `mode_volume_gain()` of the same slot. `mode_volume_take_save()` in a loop until it returns false.
 
 **Clap gate.** `mic_task` keeps the last 100 ms of samples. When `clap_detector` confirms a double clap it runs `clap_features_measure()` on a window around each onset; both must pass `clap_features_is_clap()`. The features go into the clap event either way, so the thresholds can be tuned from the web app's event list before the gate is switched on.
 
@@ -365,3 +377,39 @@ The browser talks only to the backend (REST + one WebSocket); the backend is the
 - **Player on the DevKit is a dry run**: without amplifier pins it decodes and paces in real time but outputs nothing, which checks card, playlist and decoder on the bench.
 - **ID3v2 tags are skipped** before decoding, so large embedded cover images cost nothing.
 - **Console on both USB ports**: output is mirrored to the native USB port by the IDF; `console_task` also reads input there, so the Louder works whichever port it exposes.
+
+## Player (platform)
+
+`player_task` serves all three Louder nodes. Requests go through a queue; status reads (`player_position`, `player_folder_tracks`, `player_folders`) are snapshots, so no caller waits on the card.
+
+| Call | What happens |
+| --- | --- |
+| `player_play(true/false)` | the default folder (`player_set_default_folder`: bath `"A"`, crate root); the default playlist continues its round |
+| `player_play_folder(folder, keep, rp)` | that folder now; `keep` = own playlist with a new seed (speaker KEEP sessions); `rp` = rebuild rp's playlist and continue at its track and byte offset (`resume_restore`), else a fresh shuffle |
+| `player_position()` | folder, track, seed, index, offset of what plays (the speaker's SAVE → `resume_capture`) |
+| `player_take_ended()` | a start found nothing playable (the speaker's `speaker_session_ended`) |
+| `player_voice_cue(i, beep)` | clip `i` of `player_voice_set_clips` (WAV header via `wav_clip` at every scan) or a 220 ms 1 kHz beep, mixed over the music by `voice_mix` (ducking), over silence when no music plays |
+| `player_hold(on)` | music sync: close every file / rescan and continue |
+
+The scan at boot and after `rescan` counts MP3s per root folder (WAVs in `V`) for the status documents and the speaker's `LINK_FOLDER` list.
+
+## Open items
+
+Not built yet, in the order they are likely needed. Contracts and tests of the lib modules exist for all of them unless noted.
+
+**Bedside**
+- Alarm: `alarm_schedule` (the six `alarm` keys, next alarm in the status), `armed_alarm` (RING to the speaker with version, re-arming after a reboot), `alarm_ring` (sunrise, ringing, snooze, timeout) and `bed_modes_alarm()` so buttons are ignored while it rings; commands `alarm/stop`, `alarm/snooze`; alarm events.
+- Light ramp for the sunrise (`light_ramp` on `light_pwm`, the `light` status member).
+- Display (OLED on the FPC): time, next alarm, mode, game state. No contract yet.
+- Alarm game: `game` with gun and targets over ESP-NOW (several peers in `espnow_link`, pairing window `cmd/link/pair`, ESP-NOW encryption), `node/<name>` status, commands `game/...`. The `game` settings group is already stored and synced.
+- RTC (DS3231) as time source before SNTP answers; `time_source` "rtc".
+- `remaining_s` of the running mode in the status: `bed_modes` needs a query for its timer.
+- The encoder push button still has no job.
+
+**Speaker**
+- Alarm sound: `armed_alarm` on the speaker side, `speaker_session_ring`, RING / RING_STATE frames, the button stopping a ringing alarm first and snoozing on a short press; `armed` in the status (now `"none"`).
+
+**All nodes**
+- `ota.c` (`cmd/ota`, two app slots: needs the new partition table and one USB flash), `log_capture.c` (`shower/<id>/log`, `log/verbose`), `fallback_http.c`, `identify`.
+- `espnow_link` handles one peer (bedside ↔ speaker); the peer is learned from its first HELLO, without a pairing window and unencrypted.
+- A resume point is lost when a music sync or a card swap interrupts a KEEP session (the player restarts the folder fresh after the rescan).

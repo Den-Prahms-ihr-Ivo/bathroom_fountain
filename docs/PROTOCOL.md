@@ -80,8 +80,9 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 | `cold/start`, `cold/next`, `cold/abort` | bath | – | like the cold button |
 | `scene/test` | bath, bedside | `{"scene":"<uuid>"}` | recall that scene now |
 | `hue/scenes` | bath, bedside | – | fetch the scene list from the bridge and publish it |
+| `hue/pair` | bath, bedside | – | try pairing with the bridge for 30 s: press its link button first; the new key is stored as `hue_key` and the scene list is published |
 | `voice/test` | bath | `{"cue":"go"}` (`go`, `warning`, `to_cold`, `done`) | play that clip |
-| `music/sync` | bath, speaker, crate | `{"base":"https://…/files/","files":[{"path":"B/track01.mp3","size":4812345,"sha256":"…"}]}` | pull missing or changed files, delete files not listed, then publish an event `music` |
+| `music/sync` | bath, speaker, crate | `{"base":"https://…/files/","files":[{"path":"B/track01.mp3","size":4812345,"sha256":"…"}]}` | pull missing or changed files, delete files not listed, then publish an event `music`. Rules in `lib/sync_manifest`: paths are `name` or `folder/name` (folder 1–23 of `A-Z a-z 0-9 _ -`; name up to 95 printable characters ending in `.mp3` / `.wav`); at most 256 files, payload up to 64 KB. Only `.mp3`, `.wav` and `.part` files in the root and its folders are ever deleted, so the bath's voice clips (`V/*.wav`) must be in the list. A sync while one runs: event `cmd` with `why` `busy` |
 | `ota` | all | `{"version":"2.0.1","url":"https://…/fw/bath-2.0.1.bin","sha256":"…"}` | download, verify, reboot; rollback if the new image does not confirm |
 | `log/verbose` | all | `{"minutes":10}` | send DEBUG lines for that long |
 | `restart` | all | – | reboot |

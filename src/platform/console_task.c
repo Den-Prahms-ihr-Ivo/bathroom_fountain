@@ -25,8 +25,10 @@
 
 #include "app_settings.h"
 #include "app_status.h"
+#include "events.h"
 #include "hue_task.h"
 #include "player_task.h"
+#include "server_link.h"
 #include "wifi.h"
 
 #include "board_pins.h"
@@ -77,6 +79,7 @@ static void cmd_set(const char *key, const char *value)
     switch (app_settings_set(key, value, &saved)) {
     case SETTINGS_OK:
         print_value(key);
+        server_link_settings_changed_locally(); /* the web app sees it (reported) */
         if (saved != ESP_OK) {
             printf("  not saved to flash: %s\n", esp_err_to_name(saved));
         }
@@ -107,6 +110,7 @@ static void cmd_help(void)
     printf("settings:  set <key> <value> | get <key> | show\n"
            "device:    status | next | rescan | reboot\n"
            "hue:       hue pair | hue scenes | hue normal | hue ambient\n"
+           "cold:      cold start | cold next | cold abort | voice 0..3 | beep\n"
            "test:      io | io watch | io candles on|off | io fountain on|off | amp | amp play | amp tone on|off\n");
 }
 
@@ -342,6 +346,22 @@ static void run_line(char *line)
         fflush(stdout);
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
+    } else if (strcmp(cmd, "cold") == 0) {
+        char *arg = next_word(rest, &rest);
+        const int code = strcmp(arg, "start") == 0 ? REMOTE_COLD_START
+                       : strcmp(arg, "next") == 0  ? REMOTE_COLD_NEXT
+                       : strcmp(arg, "abort") == 0 ? REMOTE_COLD_ABORT
+                                                   : 0;
+        if (code != 0) {
+            events_post(EVT_REMOTE, code);
+        } else {
+            printf("usage: cold start | cold next | cold abort\n");
+        }
+    } else if (strcmp(cmd, "voice") == 0) {
+        char *arg = next_word(rest, &rest);
+        player_voice_cue((size_t)(arg[0] >= '0' && arg[0] <= '3' ? arg[0] - '0' : 0), false);
+    } else if (strcmp(cmd, "beep") == 0) {
+        player_voice_cue(0, true);
     } else if (strcmp(cmd, "amp") == 0) {
         cmd_amp(rest);
     } else if (strcmp(cmd, "io") == 0) {

@@ -311,6 +311,11 @@ void enroll_task_net(cfg_net_t *out)
     cfg_store_unlock();
 }
 
+cfg_net_t *enroll_task_net_data(void)
+{
+    return &s.net;
+}
+
 kv_result_t enroll_task_net_set(const char *key, const char *value)
 {
     return cfg_store_set(&cfg_net_table, &s.net, key, value, NULL);

@@ -23,6 +23,11 @@ const tas5825m_io_t *amp_io_get(void);
 /* The detected I2C address, or 0 (not found yet, or log-only). */
 uint8_t amp_io_address(void);
 
+/* The amplifier's I2C bus (an i2c_master_bus_handle_t), created on first use;
+ * NULL on boards without PIN_AMP_I2C_SDA. Other chips on the same bus (the
+ * TCA9555 port expander) add themselves as devices on it. */
+void *amp_io_bus(void);
+
 /* Raw register access for the console's "amp" command (diagnostics only).
  * Return 0 on success. Only valid after amp_io_get(). */
 int amp_io_read(uint8_t reg, uint8_t *value);

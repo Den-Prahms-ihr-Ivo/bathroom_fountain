@@ -47,6 +47,7 @@
 #include "mqtt_link.h"
 #include "music_sync.h"
 #include "player_task.h"
+#include "server_link.h"
 #include "status_json.h"
 #include "tas5825m.h"
 #include "volume.h"
@@ -440,6 +441,38 @@ static void update_led(uint32_t now)
     led_set(duty);
 }
 
+/* ------------------------------------------------------------- status --- */
+
+static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static status_crate_t s_status;
+
+static void update_status(const crate_outputs_t *o)
+{
+    status_crate_t st = {
+        .state = (status_crate_state_t)o->state, /* same order */
+        .light = o->light_permille,
+        .playing = o->music_playing,
+        .volume = volume_step(s_crate.vol),
+        .battery_mv = s_crate.last_mv,
+        .battery = (status_battery_t)o->battery,  /* same order */
+    };
+    portENTER_CRITICAL(&s_status_lock);
+    const bool changed = st.state != s_status.state || st.playing != s_status.playing ||
+                         st.volume != s_status.volume || st.battery != s_status.battery;
+    s_status = st;
+    portEXIT_CRITICAL(&s_status_lock);
+    if (changed) {
+        server_link_status_changed();
+    }
+}
+
+void crate_task_status(status_crate_t *out)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    *out = s_status;
+    portEXIT_CRITICAL(&s_status_lock);
+}
+
 static void crate_task(void *arg)
 {
     (void)arg;
@@ -460,7 +493,7 @@ static void crate_task(void *arg)
                 crate_controller_battery(s_crate.cc, mv, now);
             }
         }
-        crate_controller_busy(s_crate.cc, music_sync_running(), now); /* TODO: || OTA running */
+        crate_controller_busy(s_crate.cc, music_sync_running(), now); /* later also: an OTA running */
         crate_controller_tick(s_crate.cc, now);
         handle_events(now);
 
@@ -469,6 +502,7 @@ static void crate_task(void *arg)
         update_led(now);
         amp_follow(o, now);
         save_volume(now, false);
+        update_status(o);
 
         if (o->sleep_ok && !s_crate.blinking) {
             go_to_sleep(now);

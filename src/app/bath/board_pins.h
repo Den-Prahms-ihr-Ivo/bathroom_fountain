@@ -69,6 +69,14 @@
 /* 43/44 are used as GPIOs: no UART console input on this board (USB only). */
 #define UART0_PINS_ARE_GPIO 1
 
+/* TCA9555 port expander (16 I/O) on the amplifier's I2C bus (GPIO 8/9, shared
+ * with the TAS5825M at 0x4C...0x4F), address 0x20 (A0 = A1 = A2 = GND).
+ * Breakout: VCC 3.3 V, GND, SDA -> the amp header's SDA, SCL -> SCL; the
+ * Louder's bus pull-ups are enough at 100 kHz. INT is not used (polled every
+ * 10 ms). Carrier Rev A moves the chip to GPIO 1/2; only these lines change. */
+#define EXPANDER_ON_AMP_BUS 1
+#define EXPANDER_I2C_ADDR   0x20
+
 #elif defined(BOARD_DEVKITC1)
 
 /* Bench prototype: LEDs (each with ~330 Ω to GND) stand in for the outputs.
@@ -90,5 +98,19 @@
 #else
 #error "Build with -DBOARD_LOUDER_S3_PLUS or -DBOARD_DEVKITC1 (see platformio.ini)"
 #endif
+
+/* Expander pin plan (docs/ARCHITECTURE.md, Carrier Rev A: button port n has
+ * its switch on pin 8-2n and its LED on pin 9-2n; pins 0 ... 15 = P00 ... P17).
+ * Switches go to GND (inverted inputs: pressed / closed reads 1), LEDs from
+ * the pin through ~1 kOhm to GND (high = on). Only boards that define
+ * EXPANDER_I2C_ADDR use them. */
+#define XP_COLD_BUTTON   6  /* port 1: cold button (P06)                    */
+#define XP_COLD_LED      7  /* port 1: LED in / next to it, on while a run  */
+#define XP_HYPE_SWITCH   4  /* port 2: hype/zen switch (P04), closed = hype */
+#define XP_HYPE_LED      5  /* port 2: LED, on = hype selected              */
+#define XP_SD_DETECT     8  /* reserved: card detect (P10)                  */
+#define XP_STATUS_LED    9  /* reserved: status LED (P11)                   */
+#define XP_OUTPUT_MASK   0x02AAu /* LEDs on 1, 3, 5, 7 and P11             */
+#define XP_INVERTED_MASK 0x0155u /* switches on 0, 2, 4, 6 and P10         */
 
 #endif /* BOARD_PINS_H */

@@ -8,7 +8,9 @@ set(APP_PLATFORM_SRCS
     enroll_task.c
     espnow_link.c
     events.c
+    hue_task.c
     input_task.c
     mqtt_link.c
+    server_link.c
     wifi.c
 )

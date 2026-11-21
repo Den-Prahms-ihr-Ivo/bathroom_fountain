@@ -11,7 +11,6 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -26,8 +25,10 @@
 #include "espnow_link.h"
 #include "events.h"
 #include "folder_list.h"
+#include "hue_task.h"
 #include "mode_volume.h"
 #include "node_config.h"
+#include "server_link.h"
 
 #define BED_PERIOD_MS    20u
 #define BED_TASK_STACK   6144u
@@ -54,8 +55,13 @@ static const struct {
 #define BUTTON_COUNT (sizeof(BUTTONS) / sizeof(BUTTONS[0]))
 #define STOP_INDEX   4
 
+static cfg_bed_t s_bed;          /* the "bed" settings group (cfg_store) */
+static bool s_bed_loaded;
+
+static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static bed_status_t s_status;
+
 static struct {
-    cfg_bed_t bed;              /* the "bed" settings group (cfg_store) */
     bed_modes_t *bm;
     mode_volume_t *mv;
     folder_list_t folders;
@@ -66,18 +72,25 @@ static struct {
     bool nvs_open;
     uint32_t saved_night;
     bool last_candles;
+    bed_mode_t last_mode;
+    bool last_fading;
+    const char *press_by;       /* "button" / "server" during this tick, else NULL */
+    bool sleep_continued;       /* the last sleep PLAY was a resume */
+    volatile bool config_dirty; /* the bed group changed: rebuild when idle */
 } s;
 
 /* ------------------------------------------------------------- clock --- */
 
-static void clock_start(void)
+/* SNTP runs in server_link; here only the zone (cfg_bed tz, POSIX form).
+ * Not yet: an RTC (DS3231) as time source before SNTP answers. */
+static void clock_zone(void)
 {
-    setenv("TZ", s.bed.tz, 1);
+    char tz[sizeof(s_bed.tz)];
+    cfg_store_lock();
+    memcpy(tz, s_bed.tz, sizeof(tz));
+    cfg_store_unlock();
+    setenv("TZ", tz, 1);
     tzset();
-    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
-    esp_sntp_init();
-    /* TODO: DS3231 / RTC on the I2C bus as time source before SNTP answers */
 }
 
 static uint32_t night_now(void)
@@ -103,12 +116,45 @@ static uint32_t night_now(void)
 
 /* ------------------------------------------------------------ settings --- */
 
+cfg_bed_t *bed_task_bed(void)
+{
+    if (!s_bed_loaded) {
+        cfg_store_load(&cfg_bed_table, &s_bed);
+        s_bed_loaded = true;
+    }
+    return &s_bed;
+}
+
+void bed_task_settings_changed(void)
+{
+    s.config_dirty = true;
+}
+
 static void save_folder(const char *key, const char *name)
 {
     esp_err_t saved;
-    if (cfg_store_set(&cfg_bed_table, &s.bed, key, name, &saved) == KV_OK) {
+    if (cfg_store_set(&cfg_bed_table, &s_bed, key, name, &saved) == KV_OK) {
         ESP_LOGI(TAG, "%s = %s", key, name);
-        /* TODO: publish reported settings (lib/settings_sync) so the web app shows it */
+        server_link_settings_changed_locally(); /* the web app shows the new folder */
+    }
+}
+
+static void mode_event(const char *mode, const char *by, int continued, const char *folder)
+{
+    char json[160];
+    if (status_json_event_mode(mode, by, continued, folder, server_link_utc(), json, sizeof(json)) > 0) {
+        server_link_event(json);
+    }
+    server_link_status_changed();
+}
+
+static const char *mode_name(bed_mode_t m)
+{
+    switch (m) {
+    case BED_MODE_MEDITATION: return "meditation";
+    case BED_MODE_MOOD: return "mood";
+    case BED_MODE_SLEEP: return "sleep";
+    default: return "none";
     }
 }
 
@@ -150,53 +196,65 @@ static void scene_recall(const bed_cmd_t *cmd)
 {
     settings_t st;
     app_settings_snapshot(&st, NULL);
-    const char *id = bed_audio_scene(cmd->scene, &s.bed, st.scene_normal);
+    cfg_bed_t bed;
+    cfg_store_lock();
+    bed = s_bed;
+    cfg_store_unlock();
+    const char *id = bed_audio_scene(cmd->scene, &bed, st.scene_normal);
     if (id == NULL) {
         return; /* leave the lights */
     }
-    /* TODO(hue): hue_task only recalls scene_ambient / scene_normal
-     * (hue_command_t has no id). Add a REQ_RECALL_ID request carrying the
-     * uuid and fade_ms to hue_task.c, then add hue_task.c to app.cmake. */
-    ESP_LOGI(TAG, "scene %s over %lu ms (Hue not wired yet)", id, (unsigned long)cmd->fade_ms);
+    ESP_LOGI(TAG, "scene %s over %lu ms", id, (unsigned long)cmd->fade_ms);
+    hue_task_recall_id(id, cmd->fade_ms);
 }
 
 static void run_cmd(const bed_cmd_t *cmd)
 {
     char picked[LINK_FOLDER_LEN + 1];
+    cfg_bed_t bed; /* a copy: the server may write the group meanwhile */
+    cfg_store_lock();
+    bed = s_bed;
+    cfg_store_unlock();
     switch (cmd->type) {
     case BED_CMD_SCENE:
         scene_recall(cmd);
         return;
     case BED_CMD_MOOD_FOLDER_NEXT:
-        if (bed_audio_next_folder(&s.folders, s.bed.mood_folder, BED_PREFIX_MOOD, picked, sizeof(picked))) {
+        if (bed_audio_next_folder(&s.folders, bed.mood_folder, BED_PREFIX_MOOD, picked, sizeof(picked))) {
             save_folder("mood_folder", picked);
+            mode_event("mood", s.press_by != NULL ? s.press_by : "button", -1, picked);
         }
         return;
     case BED_CMD_SLEEP_FOLDER_NEXT:
-        if (bed_audio_next_folder(&s.folders, s.bed.sleep_folder, BED_PREFIX_SLEEP, picked, sizeof(picked))) {
+        if (bed_audio_next_folder(&s.folders, bed.sleep_folder, BED_PREFIX_SLEEP, picked, sizeof(picked))) {
             save_folder("sleep_folder", picked);
         }
         return;
     case BED_CMD_PLAY:
         /* the stored folder may be "" or gone from the card */
         if (cmd->folder == BED_MODE_MOOD &&
-            bed_audio_pick_folder(&s.folders, s.bed.mood_folder, BED_PREFIX_MOOD, picked, sizeof(picked)) &&
-            strcmp(picked, s.bed.mood_folder) != 0) {
+            bed_audio_pick_folder(&s.folders, bed.mood_folder, BED_PREFIX_MOOD, picked, sizeof(picked)) &&
+            strcmp(picked, bed.mood_folder) != 0) {
             save_folder("mood_folder", picked);
+            strlcpy(bed.mood_folder, picked, sizeof(bed.mood_folder));
         }
         if (cmd->folder == BED_MODE_SLEEP &&
-            bed_audio_pick_folder(&s.folders, s.bed.sleep_folder, BED_PREFIX_SLEEP, picked, sizeof(picked)) &&
-            strcmp(picked, s.bed.sleep_folder) != 0) {
+            bed_audio_pick_folder(&s.folders, bed.sleep_folder, BED_PREFIX_SLEEP, picked, sizeof(picked)) &&
+            strcmp(picked, bed.sleep_folder) != 0) {
             save_folder("sleep_folder", picked);
+            strlcpy(bed.sleep_folder, picked, sizeof(bed.sleep_folder));
+        }
+        if (cmd->folder == BED_MODE_SLEEP) {
+            s.sleep_continued = cmd->resume;
         }
         break;
     default:
         break;
     }
     bed_audio_ctx_t ctx = {
-        .med_folder = s.bed.med_folder,
-        .mood_folder = s.bed.mood_folder,
-        .sleep_folder = s.bed.sleep_folder,
+        .med_folder = bed.med_folder,
+        .mood_folder = bed.mood_folder,
+        .sleep_folder = bed.sleep_folder,
     };
     for (int i = 0; i < BED_VOL_COUNT; i++) {
         ctx.volume[i] = mode_volume_step(s.mv, i);
@@ -215,15 +273,29 @@ static void follow_outputs(void)
     if (o->candles != s.last_candles) {
         gpio_set_level(PIN_CANDLES, o->candles ? 1 : 0);
         s.last_candles = o->candles;
+        server_link_status_changed();
+    }
+    if (o->mode != s.last_mode) {
+        /* a change without a press this tick is a timer running out */
+        mode_event(mode_name(o->mode), s.press_by != NULL ? s.press_by : "timer",
+                   o->mode == BED_MODE_SLEEP ? (s.sleep_continued ? 1 : 0) : -1, NULL);
+        s.last_mode = o->mode;
+    }
+    if (o->fading != s.last_fading) {
+        s.last_fading = o->fading;
+        server_link_status_changed();
     }
 }
 
 /* -------------------------------------------------------------- inputs --- */
 
-static void press(bed_button_t b, uint32_t now)
+static void press(bed_button_t b, const char *by, uint32_t now)
 {
     const bool used = bed_modes_button(s.bm, b, night_now(), now);
     ESP_LOGI(TAG, "button %d%s", (int)b, used ? "" : " ignored");
+    if (used) {
+        s.press_by = by;
+    }
 }
 
 static void poll_buttons(uint32_t now)
@@ -232,12 +304,12 @@ static void poll_buttons(uint32_t now)
         const bool down = gpio_get_level(BUTTONS[i].pin) == 0; /* to GND, pull-up */
         switch (button_update(s.buttons[i], down, now)) {
         case BUTTON_SHORT:
-            press(BUTTONS[i].id, now);
+            press(BUTTONS[i].id, "button", now);
             break;
         case BUTTON_LONG:
             /* only the stop button has a long press: server pairing */
             if (!enroll_task_button_held()) {
-                press(BUTTONS[i].id, now); /* no window open: a long stop is a stop */
+                press(BUTTONS[i].id, "button", now); /* no window open: a long stop is a stop */
             }
             break;
         case BUTTON_NONE:
@@ -246,7 +318,7 @@ static void poll_buttons(uint32_t now)
     }
     bed_button_t b;
     while (xQueueReceive(s.press_q, &b, 0) == pdTRUE) {
-        press(b, now);
+        press(b, "server", now);
     }
 }
 
@@ -265,6 +337,7 @@ static void handle_events(uint32_t now)
         if (bed_audio_volume_msg(mode_volume_step(s.mv, slot), &a)) {
             send_audio(&a);
         }
+        server_link_status_changed();
     }
 }
 
@@ -279,7 +352,7 @@ static void handle_link(void)
             }
             break;
         case LINK_RING_STATE:
-            /* TODO(alarm): alarm_ring / bed_modes_alarm() */
+            /* not yet: alarm_ring / bed_modes_alarm() (Open items) */
             break;
         default:
             break;
@@ -291,6 +364,72 @@ static void handle_link(void)
 static void on_link_rx(const link_msg_t *msg)
 {
     xQueueSend(s.link_q, msg, 0);
+}
+
+/* ------------------------------------------------------ config, status --- */
+
+static void modes_config(bed_modes_config_t *mc)
+{
+    cfg_bed_t bed;
+    cfg_store_lock();
+    bed = s_bed;
+    cfg_store_unlock();
+    bed_modes_config_default(mc);
+    mc->med_ms = (uint32_t)bed.med_min * 60000u;
+    mc->med_fade_ms = (uint32_t)bed.med_fade_s * 1000u;
+    mc->sleep_ms = (uint32_t)bed.sleep_timer_min * 60000u;
+    mc->sleep_fade_ms = (uint32_t)bed.sleep_fade_s * 1000u;
+    mc->sleep_candle_ms = (uint32_t)bed.sleep_candle_min * 60000u;
+}
+
+/* New timer settings: bed_modes has no reconfigure, so it is made again –
+ * only while no mode runs (the sleep night is carried over). Folders and
+ * scenes are read at every use and need nothing. */
+static void rebuild_if_idle(uint32_t now)
+{
+    if (!s.config_dirty || bed_modes_outputs(s.bm)->mode != BED_MODE_NONE) {
+        return;
+    }
+    s.config_dirty = false;
+    clock_zone();
+    bed_modes_config_t mc;
+    modes_config(&mc);
+    bed_modes_t *bm = bed_modes_create(&mc, bed_modes_sleep_night(s.bm), now);
+    if (bm == NULL) {
+        ESP_LOGW(TAG, "new timer settings refused (out of range?), old ones kept");
+        return;
+    }
+    bed_modes_destroy(s.bm);
+    s.bm = bm;
+    ESP_LOGI(TAG, "timer settings applied");
+}
+
+static void update_status(void)
+{
+    const bed_outputs_t *o = bed_modes_outputs(s.bm);
+    bed_status_t st = {
+        .mode = o->mode,
+        .fading = o->fading,
+        .candles = o->candles,
+        .speaker_up = espnow_link_peer_up(),
+    };
+    for (int i = 0; i < BED_VOL_COUNT; i++) {
+        st.volume[i] = mode_volume_step(s.mv, i);
+    }
+    portENTER_CRITICAL(&s_status_lock);
+    const bool link_changed = st.speaker_up != s_status.speaker_up;
+    s_status = st;
+    portEXIT_CRITICAL(&s_status_lock);
+    if (link_changed) {
+        server_link_status_changed();
+    }
+}
+
+void bed_task_status(bed_status_t *out)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    *out = s_status;
+    portEXIT_CRITICAL(&s_status_lock);
 }
 
 /* ---------------------------------------------------------------- task --- */
@@ -312,7 +451,9 @@ static void bed_task(void *arg)
         follow_outputs();
         save_night();
         save_volumes(now);
-        /* TODO: status_json_bedside -> mqtt_link_publish (on change, every 60 s) */
+        rebuild_if_idle(now);
+        update_status();
+        s.press_by = NULL;
     }
 }
 
@@ -344,7 +485,7 @@ static void gpio_init(void)
 void bed_task_start(void)
 {
     const uint32_t now = app_now_ms();
-    cfg_store_load(&cfg_bed_table, &s.bed);
+    bed_task_bed();
     folder_list_init(&s.folders);
     gpio_init();
 
@@ -355,14 +496,12 @@ void bed_task_start(void)
     }
 
     bed_modes_config_t mc;
-    bed_modes_config_default(&mc);
-    mc.med_ms = (uint32_t)s.bed.med_min * 60000u;
-    mc.med_fade_ms = (uint32_t)s.bed.med_fade_s * 1000u;
-    mc.sleep_ms = (uint32_t)s.bed.sleep_timer_min * 60000u;
-    mc.sleep_fade_ms = (uint32_t)s.bed.sleep_fade_s * 1000u;
-    mc.sleep_candle_ms = (uint32_t)s.bed.sleep_candle_min * 60000u;
-    /* TODO: settings/desired changes -> rebuild the config (or restart) */
+    modes_config(&mc);
     s.bm = bed_modes_create(&mc, s.saved_night, now);
+    if (s.bm == NULL) { /* stored values out of range for bed_modes: defaults */
+        bed_modes_config_default(&mc);
+        s.bm = bed_modes_create(&mc, s.saved_night, now);
+    }
 
     volume_config_t vc;
     volume_config_default(&vc);
@@ -395,7 +534,7 @@ void bed_task_start(void)
             return;
         }
     }
-    clock_start();
+    clock_zone();
     espnow_link_start(LINK_NODE_BEDSIDE, LINK_CAP_LIGHT, "bedside", on_link_rx);
     xTaskCreate(bed_task, "bed", BED_TASK_STACK, NULL, BED_TASK_PRIO, NULL);
 }

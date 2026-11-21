@@ -13,5 +13,6 @@ set(APP_PLATFORM_SRCS
     mqtt_link.c
     music_sync.c
     player_task.c
+    server_link.c
     wifi.c
 )
