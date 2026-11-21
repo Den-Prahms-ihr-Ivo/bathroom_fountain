@@ -1,5 +1,5 @@
 /*
- * Tests for lib/bed_audio – requirements BED-41 ... BED-45, BED-50, AUD-13/14.
+ * Tests for lib/bed_audio – requirements BED-41 ... BED-45, BED-50, BED-53, AUD-13/14.
  * Needs lib/folder_list (and bed_modes' bed_next_folder) to pass.
  */
 #include <stdbool.h>
@@ -157,7 +157,7 @@ static void test_play_without_usable_folder(void)
 {
     bed_cmd_t c = play(BED_MODE_SLEEP, false, true, 0);
     ctx.sleep_folder = "";
-    TEST_ASSERT_FALSE_MESSAGE(bed_audio_from_cmd(&c, &ctx, &out), "\"\" = no sleep music");
+    TEST_ASSERT_FALSE_MESSAGE(bed_audio_from_cmd(&c, &ctx, &out), "\"\": the app picks a folder first");
     ctx.sleep_folder = NULL;
     TEST_ASSERT_FALSE(bed_audio_from_cmd(&c, &ctx, &out));
     ctx.sleep_folder = "true crime";
@@ -234,7 +234,7 @@ static void test_pick_keeps_current_on_card(void)
 {
     fill_list(card, 5);
     char f[24];
-    TEST_ASSERT_TRUE(bed_audio_pick_mood(&list, "mood_jazz", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "mood_jazz", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_jazz", f);
 }
 
@@ -242,19 +242,19 @@ static void test_pick_replaces_missing_or_empty(void)
 {
     fill_list(card, 5);
     char f[24];
-    TEST_ASSERT_TRUE(bed_audio_pick_mood(&list, "", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_chill", f);
-    TEST_ASSERT_TRUE_MESSAGE(bed_audio_pick_mood(&list, "mood_disco", f, sizeof(f)), "gone from the card");
+    TEST_ASSERT_TRUE_MESSAGE(bed_audio_pick_folder(&list, "mood_disco", BED_PREFIX_MOOD, f, sizeof(f)), "gone from the card");
     TEST_ASSERT_EQUAL_STRING("mood_jazz", f);
 }
 
 static void test_pick_before_list_arrives(void)
 {
     char f[24] = "x";
-    TEST_ASSERT_TRUE(bed_audio_pick_mood(&list, "mood_rain", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "mood_rain", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_rain", f);
     strcpy(f, "x");
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(&list, "", f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, "", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("", f);
 }
 
@@ -263,47 +263,79 @@ static void test_pick_without_mood_folders(void)
     const char *const plain[] = {"sleep", "meditation"};
     fill_list(plain, 2);
     char f[24] = "x";
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(&list, "", f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, "", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("", f);
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(&list, "mood_rain", f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, "mood_rain", BED_PREFIX_MOOD, f, sizeof(f)));
 }
 
 static void test_pick_failures(void)
 {
     fill_list(card, 5);
     char f[24] = "x";
-    TEST_ASSERT_FALSE_MESSAGE(bed_audio_pick_mood(&list, "mood_jazz", f, 9), "needs 10 bytes");
+    TEST_ASSERT_FALSE_MESSAGE(bed_audio_pick_folder(&list, "mood_jazz", BED_PREFIX_MOOD, f, 9), "needs 10 bytes");
     TEST_ASSERT_EQUAL_STRING("", f);
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(NULL, "mood_jazz", f, sizeof(f)));
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(&list, NULL, f, sizeof(f)));
-    TEST_ASSERT_FALSE(bed_audio_pick_mood(&list, "mood_jazz", NULL, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(NULL, "mood_jazz", BED_PREFIX_MOOD, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, NULL, BED_PREFIX_MOOD, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, "mood_jazz", BED_PREFIX_MOOD, NULL, sizeof(f)));
 }
 
 static void test_next_mood_cycles(void)
 {
     fill_list(card, 5);
     char f[24];
-    TEST_ASSERT_TRUE(bed_audio_next_mood(&list, "mood_chill", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "mood_chill", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_jazz", f);
-    TEST_ASSERT_TRUE(bed_audio_next_mood(&list, "mood_jazz", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "mood_jazz", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_rain", f);
-    TEST_ASSERT_TRUE(bed_audio_next_mood(&list, "mood_rain", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "mood_rain", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_chill", f);
-    TEST_ASSERT_TRUE(bed_audio_next_mood(&list, "", f, sizeof(f)));
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "", BED_PREFIX_MOOD, f, sizeof(f)));
     TEST_ASSERT_EQUAL_STRING("mood_chill", f);
 }
 
 static void test_next_mood_failures(void)
 {
     char f[24] = "x";
-    TEST_ASSERT_FALSE_MESSAGE(bed_audio_next_mood(&list, "mood_rain", f, sizeof(f)), "no list yet");
+    TEST_ASSERT_FALSE_MESSAGE(bed_audio_next_folder(&list, "mood_rain", BED_PREFIX_MOOD, f, sizeof(f)), "no list yet");
     TEST_ASSERT_EQUAL_STRING("", f);
     const char *const plain[] = {"sleep"};
     fill_list(plain, 1);
-    TEST_ASSERT_FALSE(bed_audio_next_mood(&list, "", f, sizeof(f)));
-    TEST_ASSERT_FALSE(bed_audio_next_mood(NULL, "", f, sizeof(f)));
-    TEST_ASSERT_FALSE(bed_audio_next_mood(&list, NULL, f, sizeof(f)));
-    TEST_ASSERT_FALSE(bed_audio_next_mood(&list, "", NULL, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_next_folder(&list, "", BED_PREFIX_MOOD, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_next_folder(NULL, "", BED_PREFIX_MOOD, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_next_folder(&list, NULL, BED_PREFIX_MOOD, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_next_folder(&list, "", BED_PREFIX_MOOD, NULL, sizeof(f)));
+}
+
+static void test_sleep_family(void)
+{
+    const char *const card2[] = {"sleep", "sleep_true_crime", "mood_rain", "sleep_rain", "meditation"};
+    fill_list(card2, 5);
+    char f[24];
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "", BED_PREFIX_SLEEP, f, sizeof(f)));
+    TEST_ASSERT_EQUAL_STRING("sleep_rain", f);
+    TEST_ASSERT_TRUE_MESSAGE(bed_audio_pick_folder(&list, "sleep", BED_PREFIX_SLEEP, f, sizeof(f)),
+                             "an old value without the prefix is replaced");
+    TEST_ASSERT_EQUAL_STRING("sleep_rain", f);
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "sleep_true_crime", BED_PREFIX_SLEEP, f, sizeof(f)));
+    TEST_ASSERT_EQUAL_STRING("sleep_true_crime", f);
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "sleep_rain", BED_PREFIX_SLEEP, f, sizeof(f)));
+    TEST_ASSERT_EQUAL_STRING("sleep_true_crime", f);
+    TEST_ASSERT_TRUE(bed_audio_next_folder(&list, "sleep_true_crime", BED_PREFIX_SLEEP, f, sizeof(f)));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("sleep_rain", f, "wraps round, never a mood folder");
+    TEST_ASSERT_TRUE_MESSAGE(bed_audio_pick_folder(&list, "mood_rain", BED_PREFIX_SLEEP, f, sizeof(f)),
+                             "a folder of the other family is not kept");
+    TEST_ASSERT_EQUAL_STRING("sleep_rain", f);
+    TEST_ASSERT_FALSE(bed_audio_pick_folder(&list, "", NULL, f, sizeof(f)));
+    TEST_ASSERT_FALSE(bed_audio_next_folder(&list, "", NULL, f, sizeof(f)));
+}
+
+static void test_prefix_case_insensitive(void)
+{
+    const char *const card3[] = {"Sleep_Waves", "sleep_rain"};
+    fill_list(card3, 2);
+    char f[24];
+    TEST_ASSERT_TRUE(bed_audio_pick_folder(&list, "Sleep_Waves", BED_PREFIX_SLEEP, f, sizeof(f)));
+    TEST_ASSERT_EQUAL_STRING("Sleep_Waves", f);
 }
 
 int main(void)
@@ -325,6 +357,8 @@ int main(void)
     RUN_TEST(test_pick_failures);
     RUN_TEST(test_next_mood_cycles);
     RUN_TEST(test_next_mood_failures);
+    RUN_TEST(test_sleep_family);
+    RUN_TEST(test_prefix_case_insensitive);
     return UNITY_END();
 }
 

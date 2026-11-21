@@ -2,7 +2,7 @@
  * bed_modes – the bedside's music modes: meditation, mood and sleep, plus the
  * "next" and "stop" buttons (pure C, no hardware).
  *
- * Requirements: BED-40 ... BED-52 (see the requirements doc).
+ * Requirements: BED-40 ... BED-53 (see the requirements doc).
  * Tests:        test/test_bed_modes/
  *
  * The module decides; the bedside app carries it out. It never sees folder
@@ -44,6 +44,7 @@
  *   BED_CMD_MOOD_FOLDER_NEXT  the app moves its mood folder to the next
  *                  "mood_" folder (bed_next_folder()) and stores it; the
  *                  BED_CMD_PLAY that follows plays the new folder.
+ *   BED_CMD_SLEEP_FOLDER_NEXT the same for the sleep folder and "sleep_".
  *   Fields a command does not use are 0 / false (scene: BED_SCENE_NORMAL,
  *   folder: BED_MODE_NONE).
  *
@@ -64,8 +65,13 @@
  *     otherwise: SCENE(MOOD, start_fade_ms), PLAY(MOOD, false, false,
  *       start_fade_ms); candles on; mode MOOD. Mood has no timer.
  *   SLEEP
- *     mode is SLEEP and not fading: the timer restarts (cfg.sleep_ms from
- *       now). No command; candles and their timer are left alone.
+ *     mode is SLEEP and not fading: like mood, the next folder:
+ *       SLEEP_FOLDER_NEXT, then PLAY(SLEEP, resume true, keep true,
+ *       start_fade_ms) (each sleep folder continues where it stopped, if it
+ *       has played before). The sleep timer keeps running from where it
+ *       was (switching is not extending); candles and their timer are left
+ *       alone. The first press of a night plays the current folder from a
+ *       random track (see below).
  *     mode is SLEEP and fading: the fade is cancelled: PLAY(SLEEP, resume
  *       true, keep true, start_fade_ms); timer cfg.sleep_ms from now.
  *       Candles left alone.
@@ -94,8 +100,9 @@
  *   Sleep candle timer runs out: candles off. It runs on its own: it is not
  *     stopped by the sleep timer, only by STOP, by another mode, by the alarm
  *     and by a continuation.
- *   The timer restarts above restart the mode timer only, never a fade that
- *   has begun (except SLEEP, which cancels its fade as listed).
+ *   The meditation timer restart above restarts the mode timer only, never
+ *   a fade that has begun. SLEEP during its fade cancels the fade and starts
+ *   a new sleep timer, as listed.
  *
  * Nights
  *   The app passes `night` with every press: bed_night_id() of the local
@@ -158,6 +165,7 @@ typedef enum {
     BED_CMD_STOP,
     BED_CMD_NEXT,
     BED_CMD_MOOD_FOLDER_NEXT,
+    BED_CMD_SLEEP_FOLDER_NEXT,
 } bed_cmd_type_t;
 
 typedef struct {

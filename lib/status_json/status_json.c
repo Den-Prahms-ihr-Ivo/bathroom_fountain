@@ -34,7 +34,7 @@ static bool jb_init(jb_t *j, char *out, size_t out_size)
     return j->ok;
 }
 
-/* Only called after a successful jb_init(), so buf holds at least one byte. */
+/* Only called after a successful jb_init(). */
 static size_t jb_fail(jb_t *j)
 {
     j->buf[0] = '\0';
@@ -199,9 +199,9 @@ size_t status_json_bath(const status_common_t *c, const status_bath_t *b, char *
     key(&j, "tracks");
     put(&j, "{");
     for (size_t i = 0; i < b->track_count; i++) {
-        char name[STATUS_TRACK_NAME_MAX + 1];
-        memcpy(name, b->tracks[i].name, STATUS_TRACK_NAME_MAX);
-        name[STATUS_TRACK_NAME_MAX] = '\0';
+        char name[sizeof(b->tracks[i].name)];
+        memcpy(name, b->tracks[i].name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
         if (i > 0) {
             put(&j, ",");
         }
@@ -230,118 +230,175 @@ size_t status_json_bath(const status_common_t *c, const status_bath_t *b, char *
 
 /* ---- speaker ------------------------------------------------------------- */
 
-size_t status_json_speaker(const status_common_t *c, const status_speaker_t *s, char *out, size_t out_size)
+size_t status_json_speaker(const status_common_t *c, const status_speaker_t *sp, char *out, size_t out_size)
 {
     jb_t j;
     if (!jb_init(&j, out, out_size)) {
         return 0;
     }
     static const char *const playing[] = {"none", "alarm", "music"};
-    if (c == NULL || s == NULL || (unsigned)s->playing > STATUS_PLAY_MUSIC || s->folder_count > STATUS_MAX_FOLDERS
+    if (c == NULL || sp == NULL || (unsigned)sp->playing > STATUS_PLAY_MUSIC || sp->folder_count > STATUS_MAX_FOLDERS
         || !common(&j, c, "bedroom_speaker")) {
         return jb_fail(&j);
     }
     key(&j, "playing");
-    put_str(&j, playing[s->playing]);
+    put_str(&j, playing[sp->playing]);
     key(&j, "folder");
-    put_str(&j, s->folder);
+    put_str(&j, sp->folder);
     key(&j, "kept");
-    put_bool(&j, s->kept);
+    put_bool(&j, sp->kept);
     key(&j, "volume");
-    put_i64(&j, s->volume);
+    put_i64(&j, sp->volume);
     key(&j, "sd");
-    put_str(&j, s->sd);
+    put_str(&j, sp->sd);
     key(&j, "folders");
     put(&j, "[");
-    for (size_t i = 0; i < s->folder_count; i++) {
+    for (size_t i = 0; i < sp->folder_count; i++) {
         if (i > 0) {
             put(&j, ",");
         }
-        put_str(&j, s->folders[i]);
+        put_str(&j, sp->folders[i]);
     }
     put(&j, "]");
     key(&j, "armed");
     put(&j, "{\"state\":");
-    put_str(&j, s->armed_state);
+    put_str(&j, sp->armed_state);
     put(&j, ",\"version\":");
-    put_i64(&j, s->armed_version);
+    put_i64(&j, sp->armed_version);
     put(&j, ",\"alarm_utc\":");
-    if (s->armed_alarm_utc < 0) {
+    if (sp->armed_alarm_utc < 0) {
         put(&j, "null");
     } else {
-        put_i64(&j, s->armed_alarm_utc);
+        put_i64(&j, sp->armed_alarm_utc);
     }
     put(&j, "}");
     key(&j, "link");
-    put_str(&j, s->link_up ? "up" : "down");
+    put_str(&j, sp->link_up ? "up" : "down");
     put(&j, "}");
     return jb_finish(&j);
 }
 
 /* ---- bedside ------------------------------------------------------------- */
 
-size_t status_json_bedside(const status_common_t *c, const status_bedside_t *b, char *out, size_t out_size)
+size_t status_json_bedside(const status_common_t *c, const status_bedside_t *bs, char *out, size_t out_size)
 {
     jb_t j;
     if (!jb_init(&j, out, out_size)) {
         return 0;
     }
-    static const char *const sources[] = {"none", "sntp", "rtc"};
+    static const char *const sources[] = {"none", "rtc", "sntp"};
     static const char *const modes[] = {"none", "meditation", "mood", "sleep"};
-    if (c == NULL || b == NULL || (unsigned)b->time_source > STATUS_TIME_RTC || (unsigned)b->mode > STATUS_BED_SLEEP
+    if (c == NULL || bs == NULL || (unsigned)bs->time_source > STATUS_TIME_SNTP || (unsigned)bs->mode > STATUS_BED_SLEEP
         || !common(&j, c, "bedside")) {
         return jb_fail(&j);
     }
     key(&j, "time");
-    put_str(&j, b->time);
+    put_str(&j, bs->time);
     key(&j, "time_source");
-    put_str(&j, sources[b->time_source]);
+    put_str(&j, sources[bs->time_source]);
     key(&j, "armed_switch");
-    put_bool(&j, b->armed_switch);
+    put_bool(&j, bs->armed_switch);
     key(&j, "next_alarm");
-    if (b->has_next_alarm) {
+    if (bs->has_next_alarm) {
         put(&j, "{\"slot\":");
-        put_i64(&j, b->next_alarm_slot);
+        put_i64(&j, bs->next_alarm_slot);
         put(&j, ",\"local\":");
-        put_str(&j, b->next_alarm_local);
+        put_str(&j, bs->next_alarm_local);
         put(&j, "}");
     } else {
         put(&j, "null");
     }
     key(&j, "alarm");
-    put_str(&j, b->alarm);
+    put_str(&j, bs->alarm);
     key(&j, "light");
-    put_i64(&j, b->light);
+    put_i64(&j, bs->light);
     key(&j, "mode");
-    put_str(&j, modes[b->mode]);
+    put_str(&j, modes[bs->mode]);
     key(&j, "fading");
-    put_bool(&j, b->fading);
+    put_bool(&j, bs->fading);
     key(&j, "candles");
-    put_bool(&j, b->candles);
+    put_bool(&j, bs->candles);
     key(&j, "volumes");
     put(&j, "{\"meditation\":");
-    put_i64(&j, b->volume_meditation);
+    put_i64(&j, bs->volume_meditation);
     put(&j, ",\"mood\":");
-    put_i64(&j, b->volume_mood);
+    put_i64(&j, bs->volume_mood);
     put(&j, ",\"sleep\":");
-    put_i64(&j, b->volume_sleep);
+    put_i64(&j, bs->volume_sleep);
     put(&j, "}");
     key(&j, "remaining_s");
-    if (b->remaining_s < 0) {
+    if (bs->remaining_s < 0) {
         put(&j, "null");
     } else {
-        put_i64(&j, b->remaining_s);
+        put_i64(&j, bs->remaining_s);
     }
     key(&j, "speaker");
-    put_str(&j, b->speaker_up ? "up" : "down");
+    put_str(&j, bs->speaker_up ? "up" : "down");
     key(&j, "game");
     put(&j, "{\"state\":");
-    put_str(&j, b->game_state);
+    put_str(&j, bs->game_state);
     put(&j, ",\"hits\":");
-    put_i64(&j, b->game_hits);
+    put_i64(&j, bs->game_hits);
     put(&j, ",\"needed\":");
-    put_i64(&j, b->game_needed);
+    put_i64(&j, bs->game_needed);
     put(&j, "}}");
+    return jb_finish(&j);
+}
+
+/* ---- crate --------------------------------------------------------------- */
+
+static const char *const battery_names[] = {"ok", "low", "empty"};
+
+size_t status_json_crate(const status_common_t *c, const status_crate_t *cr, char *out, size_t out_size)
+{
+    jb_t j;
+    if (!jb_init(&j, out, out_size)) {
+        return 0;
+    }
+    static const char *const states[] = {"closed", "open", "dim", "closing"};
+    if (c == NULL || cr == NULL || (unsigned)cr->state > STATUS_CRATE_CLOSING
+        || (unsigned)cr->battery > STATUS_BATT_EMPTY || !common(&j, c, "crate")) {
+        return jb_fail(&j);
+    }
+    key(&j, "state");
+    put_str(&j, states[cr->state]);
+    key(&j, "light");
+    put_i64(&j, cr->light);
+    key(&j, "playing");
+    put_bool(&j, cr->playing);
+    key(&j, "volume");
+    put_i64(&j, cr->volume);
+    key(&j, "battery_mv");
+    put_i64(&j, cr->battery_mv);
+    key(&j, "battery");
+    put_str(&j, battery_names[cr->battery]);
+    key(&j, "sd");
+    put_str(&j, cr->sd);
+    key(&j, "tracks");
+    put_i64(&j, cr->tracks);
+    put(&j, "}");
+    return jb_finish(&j);
+}
+
+size_t status_json_crate_asleep(uint16_t battery_mv, status_battery_t battery, char *out, size_t out_size)
+{
+    jb_t j;
+    if (!jb_init(&j, out, out_size)) {
+        return 0;
+    }
+    if ((unsigned)battery > STATUS_BATT_EMPTY) {
+        return jb_fail(&j);
+    }
+    put(&j, "{\"online\":false");
+    key(&j, "node");
+    put_str(&j, "crate");
+    key(&j, "asleep");
+    put_bool(&j, true);
+    key(&j, "battery_mv");
+    put_i64(&j, battery_mv);
+    key(&j, "battery");
+    put_str(&j, battery_names[battery]);
+    put(&j, "}");
     return jb_finish(&j);
 }
 
@@ -394,7 +451,7 @@ size_t status_json_event_mode(const char *mode, const char *by, int continued, c
     return event_end(&j, t);
 }
 
-size_t status_json_event_alarm(const char *event, int slot, int game, const char *reason, int64_t t, char *out,
+size_t status_json_event_alarm(const char *event, uint8_t slot, int game, const char *reason, int64_t t, char *out,
                                size_t out_size)
 {
     jb_t j;

@@ -1,67 +1,85 @@
 /*
- * speaker_session – the bedroom speaker's music session: LINK_AUDIO from the
- * bedside, the alarm and standby turned into start / save / halt / next
- * actions for the player, plus the fade level (pure C, no audio).
+ * speaker_session – what the bedroom speaker plays, decided from LINK_AUDIO,
+ * the alarm and standby (pure C, no hardware).
  *
  * Requirements: BED-44 ... BED-48, BED-52 (see the requirements doc).
  * Tests:        test/test_speaker_session/
  *
- * Time: now_ms is a wrapping uint32 millisecond counter. Every call that
- * takes now_ms first brings the state up to date (a fade-out that ended
- * since the last call halts first, at its planned time).
+ * The bedside owns all timers; the speaker only plays, fades and stops.
+ * speaker_task feeds every LINK_AUDIO, the alarm state (armed_alarm) and
+ * standby into this module, carries out its actions in order, and sets the
+ * amplifier gain every tick:
+ *   gain = volume_gain(step) * fade_curve_gain(speaker_session_level(now))
+ * (volume_gain of a lib/volume object with the same config as the bedside's
+ * mode_volume, set to outputs.volume).
  *
  * States (outputs.state)
- *   SPK_IDLE        nothing plays, amplifier off.
- *   SPK_PLAYING     a session plays (also while it fades in).
- *   SPK_FADING_OUT  a STOP's fade-out runs; HALT when it is over.
- *   SPK_ALARM       the alarm rings; the session is gone, LINK_AUDIO is
- *                   ignored except VOLUME.
- *   outputs.folder / kept describe the session ("" / false without one);
- *   amp_on is true in PLAYING and FADING_OUT. outputs.volume is the last
- *   volume step received (create's start value until then).
+ *   SPK_IDLE        nothing plays, amplifier may be off.
+ *   SPK_PLAYING     a session plays (fading in or at full level).
+ *   SPK_FADING_OUT  a STOP's fade runs; at its end: HALT, IDLE.
+ *   SPK_ALARM       the alarm owns the speaker (armed_alarm / player);
+ *                   every LINK_AUDIO except VOLUME is ignored.
  *
- * Actions (speaker_session_take(), oldest first; at most SPK_ACTS wait, the
- * oldest is dropped when full). folder is "" except for START.
- *   SPK_ACT_START  play `folder` from a fresh shuffle, or (resume) from its
- *                  resume point if there is one.
- *   SPK_ACT_SAVE   capture the resume point of the running kept session now
- *                  (before any fade).
- *   SPK_ACT_HALT   stop the music now and power the amplifier down.
- *   SPK_ACT_NEXT   next track.
+ * Actions (speaker_session_take(), oldest first, at most SPK_ACTS; the
+ * oldest is dropped when full)
+ *   START(folder, resume)  open the folder: resume = try lib/resume_restore,
+ *                  else (or if that fails) a fresh shuffle. Replaces whatever
+ *                  the player was playing.
+ *   SAVE           write the resume point of the session playing *now*
+ *                  (lib/resume_restore resume_capture). Only for kept
+ *                  sessions, always before the START / HALT that ends it.
+ *   HALT           stop decoding at once.
+ *   NEXT           next track of the session.
  *
- * LINK_AUDIO (speaker_session_audio(); true if it did something)
- *   PLAY   refused (false, nothing changes) while ringing, for a folder
- *          that is "" or not cfg_folder_valid(), or a volume above 32.
- *          RESUME of the folder that plays or fades out: plays on, no
- *          action; the fade is cancelled and the level rises from where it
- *          is to 1 over fade_ds. Otherwise: SAVE first if a kept session is
- *          PLAYING (one that fades out was saved at its STOP), then
- *          START(folder, resume); the level rises from 0 to 1 over fade_ds.
- *          Both set volume and kept (from the KEEP flag).
- *   STOP   IDLE or ringing: false. PLAYING: SAVE if kept, then the level
- *          falls from where it is to 0 over fade_ds. FADING_OUT: the fade
- *          restarts from the current level (no second SAVE). With fade_ds 0
- *          the HALT comes at once.
- *   NEXT   NEXT action while PLAYING or FADING_OUT; otherwise false.
- *   VOLUME any state (also ringing); false above 32. The fade is untouched.
- *   Unknown commands: false.
+ * Level: a linear 0 ... 1 ramp. A START ramps 0 -> 1 over the PLAY's fade;
+ * a STOP ramps from the current level to 0 over its fade; a fade cancel
+ * (below) ramps from the current level to 1 over the PLAY's fade. fade 0 =
+ * jump. IDLE and ALARM: level 0.
  *
- * speaker_session_ring(ringing): false -> true ends the session: SAVE if a
- *   kept session was PLAYING, HALT if anything played; state ALARM.
- *   true -> false: IDLE. Repeating the same value changes nothing.
- * speaker_session_standby(): the speaker goes to standby. Like a STOP
- *   without fade (SAVE if a kept session was PLAYING, HALT); false if idle
- *   or ringing.
- * speaker_session_ended(): the player ran out of music. IDLE without any
- *   action; false if idle or ringing.
+ * speaker_session_audio(msg, now) – returns true if the message did
+ * something:
+ *   PLAY (folder must pass cfg_folder_valid() and not be "", volume <= 32,
+ *        else ignored)
+ *     ALARM: ignored.
+ *     RESUME flag, state PLAYING or FADING_OUT, folder == outputs.folder:
+ *       fade cancel: state PLAYING, ramp to 1 over fade_ds; volume and kept
+ *       (= KEEP flag) taken from the message. No action.
+ *     otherwise: SAVE first if the state is PLAYING and the session is kept
+ *       (a FADING_OUT session was saved at its STOP); then START(folder,
+ *       RESUME flag). State PLAYING, outputs.folder = folder, kept = KEEP
+ *       flag, volume = message volume, ramp 0 -> 1.
+ *   STOP
+ *     PLAYING: SAVE if kept. fade 0: HALT, IDLE. Else FADING_OUT, ramp to 0.
+ *     FADING_OUT: a new ramp from the current level over the new fade
+ *       (fade 0: HALT, IDLE at once). No SAVE.
+ *     IDLE, ALARM: ignored.
+ *   VOLUME (volume <= 32, else ignored): outputs.volume = volume, in every
+ *     state (also IDLE and ALARM: it applies to what comes next).
+ *   NEXT: PLAYING or FADING_OUT: NEXT. Else ignored.
+ *   other cmd values, NULL: ignored.
+ *   In IDLE / ALARM, outputs.folder is "" and kept is false.
  *
- * speaker_session_level(now): fade level 0.0 ... 1.0 (linear in time),
- *   0 in IDLE and ALARM. The player multiplies it with the volume gain.
+ * speaker_session_ring(ringing, now)
+ *   false -> true: SAVE if PLAYING and kept; HALT if PLAYING or FADING_OUT;
+ *     state ALARM. true -> false: ALARM -> IDLE. Same value again: nothing.
+ * speaker_session_standby(now) (long press on the speaker's button)
+ *   PLAYING: SAVE if kept, HALT, IDLE. FADING_OUT: HALT, IDLE. Returns true.
+ *   IDLE, ALARM: nothing, false.
+ * speaker_session_ended(now) (the player found nothing to play: empty or
+ *   missing folder, card gone)
+ *   PLAYING / FADING_OUT: IDLE, no action (nothing to save or halt). true.
+ *   Else false.
+ * speaker_session_tick(now): a fade-out that has run its course: HALT, IDLE.
+ *   Every function taking now first does the same.
+ *
+ * outputs.amp_on: true in PLAYING and FADING_OUT.
+ * Times: wrapping uint32 ms; fades up to 6553.5 s.
  */
 #ifndef SPEAKER_SESSION_H
 #define SPEAKER_SESSION_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "link_msg.h"
@@ -71,7 +89,6 @@ extern "C" {
 #endif
 
 #define SPK_ACTS 8
-#define SPK_VOLUME_MAX 32
 
 typedef enum {
     SPK_IDLE = 0,
@@ -89,45 +106,41 @@ typedef enum {
 
 typedef struct {
     spk_act_type_t type;
-    char folder[LINK_FOLDER_LEN + 1]; /* START */
-    bool resume;                      /* START */
+    bool resume;                       /* START */
+    char folder[LINK_FOLDER_LEN + 1];  /* START; "" otherwise */
 } spk_act_t;
 
 typedef struct {
     spk_state_t state;
     char folder[LINK_FOLDER_LEN + 1];
     bool kept;
+    uint8_t volume; /* step 0 ... 32 */
     bool amp_on;
-    uint8_t volume;
 } spk_outputs_t;
 
 typedef struct speaker_session speaker_session_t;
 
-/* volume: the start volume step, clamped to 32. NULL if memory runs out. */
-speaker_session_t *speaker_session_create(uint8_t volume, uint32_t now_ms);
+/* Starts IDLE, level 0, no action. initial_volume above 32 is taken as 32.
+ * NULL only when memory runs out. */
+speaker_session_t *speaker_session_create(uint8_t initial_volume, uint32_t now_ms);
 
 /* Accepts NULL. */
 void speaker_session_destroy(speaker_session_t *s);
 
-/* false for NULL arguments. */
-bool speaker_session_audio(speaker_session_t *s, const link_audio_t *m, uint32_t now_ms);
-
+bool speaker_session_audio(speaker_session_t *s, const link_audio_t *msg, uint32_t now_ms);
 void speaker_session_ring(speaker_session_t *s, bool ringing, uint32_t now_ms);
-
 bool speaker_session_standby(speaker_session_t *s, uint32_t now_ms);
-
 bool speaker_session_ended(speaker_session_t *s, uint32_t now_ms);
-
-/* Call regularly (e.g. every 100 ms). */
 void speaker_session_tick(speaker_session_t *s, uint32_t now_ms);
 
-/* NULL for s NULL. The pointer stays valid for the object's lifetime. */
-const spk_outputs_t *speaker_session_outputs(const speaker_session_t *s);
-
-/* 0 for s NULL. Does not change the state. */
+/* Fade level 0 ... 1 at now (does not change the state; call tick for
+ * that). 0 for NULL. */
 float speaker_session_level(const speaker_session_t *s, uint32_t now_ms);
 
-/* false for NULL arguments or an empty queue. */
+/* Valid for the object's lifetime; NULL for NULL. */
+const spk_outputs_t *speaker_session_outputs(const speaker_session_t *s);
+
+/* false if nothing waits or an argument is NULL. */
 bool speaker_session_take(speaker_session_t *s, spk_act_t *out);
 
 #ifdef __cplusplus

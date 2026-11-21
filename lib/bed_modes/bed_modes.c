@@ -255,7 +255,10 @@ static void press_sleep(bed_modes_t *bm, uint32_t night, uint32_t now_ms)
         bm->fade_timer.active = false;
         push_play(bm, BED_MODE_SLEEP, true, true);
     } else if (bm->out.mode == BED_MODE_SLEEP) {
-        /* timer restart only */
+        /* next sleep folder; switching is not extending: timer keeps running */
+        push_simple(bm, BED_CMD_SLEEP_FOLDER_NEXT, 0);
+        push_play(bm, BED_MODE_SLEEP, true, true);
+        return;
     } else if (is_continuation(bm, night, now_ms)) {
         push_play(bm, BED_MODE_SLEEP, true, true);
         switch_to(bm, BED_MODE_SLEEP);

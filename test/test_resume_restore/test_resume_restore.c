@@ -231,6 +231,23 @@ static void test_replay_limit_itself_is_allowed(void)
     TEST_ASSERT_EQUAL_UINT32(1, offset);
 }
 
+static void test_resume_key(void)
+{
+    char k[16];
+    TEST_ASSERT_TRUE(resume_key("sleep_rain", k, sizeof(k)));
+    TEST_ASSERT_EQUAL_STRING("rp931cbb23", k);
+    TEST_ASSERT_TRUE(resume_key("sleep_true_crime", k, sizeof(k)));
+    TEST_ASSERT_EQUAL_STRING("rpf88b15f8", k);
+    TEST_ASSERT_TRUE(resume_key("a", k, 11));
+    TEST_ASSERT_EQUAL_STRING("rpe40c292c", k);
+    strcpy(k, "x");
+    TEST_ASSERT_FALSE(resume_key("a", k, 10));
+    TEST_ASSERT_EQUAL_STRING("", k);
+    TEST_ASSERT_FALSE(resume_key("", k, sizeof(k)));
+    TEST_ASSERT_FALSE(resume_key(NULL, k, sizeof(k)));
+    TEST_ASSERT_FALSE(resume_key("a", NULL, sizeof(k)));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -245,6 +262,7 @@ int main(void)
     RUN_TEST(test_refusals_do_not_touch_playlist);
     RUN_TEST(test_empty_playlist);
     RUN_TEST(test_replay_limit_itself_is_allowed);
+    RUN_TEST(test_resume_key);
     return UNITY_END();
 }
 

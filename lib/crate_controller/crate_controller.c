@@ -32,6 +32,8 @@ struct crate_controller {
     uint32_t open_since;  /* for max_open_ms */
     uint32_t closed_since;
 
+    bool busy; /* download or update running (CRATE-13) */
+
     /* battery */
     run_t run_empty;   /* mv < cutoff            */
     run_t run_low;     /* mv < warn              */
@@ -59,6 +61,7 @@ void crate_config_default(crate_config_t *cfg)
     cfg->warn_mv = 12800;
     cfg->battery_hold_ms = 10000;
     cfg->sleep_delay_ms = 2000;
+    cfg->busy_max_ms = 600000;
 }
 
 static bool config_ok(const crate_config_t *c)
@@ -68,7 +71,8 @@ static bool config_ok(const crate_config_t *c)
            c->volume >= 1 && c->volume <= 1000 &&
            (c->max_open_ms == 0 || (c->max_open_ms >= 60000 && c->max_open_ms <= 3600000u)) &&
            c->cutoff_mv >= 10000 && c->cutoff_mv <= 13500 && c->warn_mv >= c->cutoff_mv && c->warn_mv <= 14000 &&
-           c->battery_hold_ms >= 1000 && c->battery_hold_ms <= 60000 && c->sleep_delay_ms <= 60000;
+           c->battery_hold_ms >= 1000 && c->battery_hold_ms <= 60000 && c->sleep_delay_ms <= 60000 &&
+           c->busy_max_ms <= 3600000u;
 }
 
 static void push_event(crate_controller_t *cc, crate_event_t e)
@@ -215,9 +219,14 @@ static void update(crate_controller_t *cc, uint32_t now)
             break;
         }
     }
-    cc->out.sleep_ok = cc->out.state == CRATE_CLOSED &&
-                       (uint32_t)(now - cc->closed_since) >= cc->cfg.sleep_delay_ms &&
-                       (!cc->out.lid_open || cc->out.battery == CRATE_BATT_EMPTY);
+    const uint32_t closed_for = now - cc->closed_since;
+    bool sleep_ok = cc->out.state == CRATE_CLOSED && closed_for >= cc->cfg.sleep_delay_ms &&
+                    (!cc->out.lid_open || cc->out.battery == CRATE_BATT_EMPTY);
+    if (sleep_ok && cc->busy && cc->out.battery != CRATE_BATT_EMPTY) {
+        /* busy holds sleep back for at most busy_max_ms after the delay */
+        sleep_ok = closed_for - cc->cfg.sleep_delay_ms >= cc->cfg.busy_max_ms;
+    }
+    cc->out.sleep_ok = sleep_ok;
 }
 
 crate_controller_t *crate_controller_create(const crate_config_t *cfg, bool lid_open, uint32_t now_ms)
@@ -339,4 +348,14 @@ bool crate_controller_take_event(crate_controller_t *cc, crate_event_t *out)
     cc->ev_head = (uint8_t)((cc->ev_head + 1) % CRATE_EVENTS);
     cc->ev_count--;
     return true;
+}
+
+void crate_controller_busy(crate_controller_t *cc, bool busy, uint32_t now_ms)
+{
+    if (cc == NULL) {
+        return;
+    }
+    update(cc, now_ms);
+    cc->busy = busy;
+    update(cc, now_ms);
 }

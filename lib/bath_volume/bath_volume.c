@@ -1,20 +1,17 @@
 /*
- * bath_volume – which volume slot the bath's encoder sets.
+ * bath_volume – which of the bath's volumes the encoder sets.
  * Contract in bath_volume.h, tests in test/test_bath_volume/.
  */
 #include "bath_volume.h"
 
-#include <stddef.h>
+#include "mode_volume.h"
 
-int bath_volume_mode(const mode_outputs_t *o, bool cold_running)
+int bath_volume_mode(const mode_outputs_t *outputs, bool cold_running)
 {
     if (cold_running) {
         return BATH_VOL_COLD;
     }
-    if (o == NULL) {
-        return MODE_VOLUME_NONE;
-    }
-    if (o->mode == AMBIENCE_AMBIENT || (o->transitioning && o->music_playing)) {
+    if (outputs != NULL && (outputs->mode == AMBIENCE_AMBIENT || outputs->music_playing)) {
         return BATH_VOL_AMBIENT;
     }
     return MODE_VOLUME_NONE;

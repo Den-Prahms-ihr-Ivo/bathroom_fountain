@@ -29,6 +29,7 @@ void setUp(void)
     cfg.warn_mv = 12800;
     cfg.battery_hold_ms = 10000;
     cfg.sleep_delay_ms = 2000;
+    cfg.busy_max_ms = 600000;
     cc = NULL;
     now = 5000000u;
     lid = false;
@@ -123,6 +124,7 @@ static void test_defaults_and_validation(void)
     TEST_ASSERT_EQUAL_UINT16(12800, d.warn_mv);
     TEST_ASSERT_EQUAL_UINT16(10000, d.battery_hold_ms);
     TEST_ASSERT_EQUAL_UINT16(2000, d.sleep_delay_ms);
+    TEST_ASSERT_EQUAL_UINT32(600000, d.busy_max_ms);
 
     crate_config_t b;
 #define BAD(field, value)                                                   \
@@ -131,6 +133,7 @@ static void test_defaults_and_validation(void)
         b.field = value;                                                    \
         TEST_ASSERT_NULL_MESSAGE(crate_controller_create(&b, false, now), #field " = " #value); \
     } while (0)
+    BAD(busy_max_ms, 3600001);
     BAD(debounce_ms, 9);
     BAD(debounce_ms, 501);
     BAD(open_level, 0);
@@ -454,6 +457,109 @@ static void test_late_poll_and_clock_wrap(void)
     expect_event(CRATE_EV_MUSIC_STOP);
 }
 
+/* ---- busy: a download keeps the closed crate awake (CRATE-13) ------------ */
+
+static void drain_events(void)
+{
+    crate_event_t e;
+    while (crate_controller_take_event(cc, &e)) {
+    }
+}
+
+static void closed_after_use(void)
+{
+    create(true);
+    drain_events();
+    set_lid(false);
+    run_ms(3000); /* close fade */
+    TEST_ASSERT_EQUAL_INT(CRATE_CLOSED, out()->state);
+    expect_event(CRATE_EV_MUSIC_STOP);
+    expect_no_event();
+}
+
+static void test_busy_delays_sleep(void)
+{
+    closed_after_use();
+    crate_controller_busy(cc, true, now);
+    run_ms(2000);
+    TEST_ASSERT_FALSE_MESSAGE(out()->sleep_ok, "download running: stay awake");
+    TEST_ASSERT_EQUAL_INT(CRATE_CLOSED, out()->state);
+    TEST_ASSERT_FALSE(out()->amp_on);
+    TEST_ASSERT_EQUAL_UINT16(0, out()->light_permille);
+    run_ms(60000);
+    TEST_ASSERT_FALSE(out()->sleep_ok);
+    crate_controller_busy(cc, false, now);
+    TEST_ASSERT_TRUE_MESSAGE(out()->sleep_ok, "download done: sleep at once");
+    expect_no_event();
+}
+
+static void test_busy_has_a_limit(void)
+{
+    closed_after_use();
+    const uint32_t closed_at = now;
+    crate_controller_busy(cc, true, now);
+    while (now - closed_at < 2000u + 600000u - 10u) {
+        run_ms(10);
+    }
+    TEST_ASSERT_FALSE(out()->sleep_ok);
+    run_ms(10);
+    TEST_ASSERT_TRUE_MESSAGE(out()->sleep_ok, "10 min after the sleep delay: sleep anyway");
+}
+
+static void test_busy_limit_zero(void)
+{
+    cfg.busy_max_ms = 0;
+    closed_after_use();
+    crate_controller_busy(cc, true, now);
+    run_ms(2000);
+    TEST_ASSERT_TRUE(out()->sleep_ok);
+}
+
+static void test_busy_changes_nothing_while_open(void)
+{
+    create(true);
+    drain_events();
+    crate_controller_busy(cc, true, now);
+    run_ms(5000);
+    expect_open_outputs();
+    expect_no_event();
+    crate_controller_busy(cc, false, now);
+    expect_open_outputs();
+}
+
+static void test_busy_set_before_closing(void)
+{
+    create(true);
+    drain_events();
+    crate_controller_busy(cc, true, now);
+    set_lid(false);
+    run_ms(3000 + 2000 + 1000);
+    TEST_ASSERT_EQUAL_INT(CRATE_CLOSED, out()->state);
+    TEST_ASSERT_FALSE(out()->sleep_ok);
+    expect_event(CRATE_EV_MUSIC_STOP);
+    /* reopening during the download works as always */
+    set_lid(true);
+    TEST_ASSERT_EQUAL_INT(CRATE_OPEN, out()->state);
+    expect_event(CRATE_EV_MUSIC_START);
+}
+
+static void test_busy_ignored_on_empty_battery(void)
+{
+    create(false);
+    crate_controller_busy(cc, true, now);
+    for (int i = 0; i < 12; i++) {
+        crate_controller_battery(cc, 12000, now);
+        run_ms(1000);
+    }
+    TEST_ASSERT_EQUAL_INT(CRATE_BATT_EMPTY, out()->battery);
+    TEST_ASSERT_TRUE_MESSAGE(out()->sleep_ok, "empty battery: sleep despite the download");
+}
+
+static void test_busy_null_is_ignored(void)
+{
+    crate_controller_busy(NULL, true, now);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -472,6 +578,13 @@ int main(void)
     RUN_TEST(test_battery_runs_empty_while_open);
     RUN_TEST(test_opening_with_an_empty_battery_only_blinks);
     RUN_TEST(test_late_poll_and_clock_wrap);
+    RUN_TEST(test_busy_delays_sleep);
+    RUN_TEST(test_busy_has_a_limit);
+    RUN_TEST(test_busy_limit_zero);
+    RUN_TEST(test_busy_changes_nothing_while_open);
+    RUN_TEST(test_busy_set_before_closing);
+    RUN_TEST(test_busy_ignored_on_empty_battery);
+    RUN_TEST(test_busy_null_is_ignored);
     return UNITY_END();
 }
 

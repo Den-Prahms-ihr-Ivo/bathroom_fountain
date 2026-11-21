@@ -67,7 +67,7 @@ static void expect_keys(const kv_table_t *t, const char *group, const char *cons
 
 static void test_key_lists(void)
 {
-    static const char *const net_keys[] = {"device_id", "mqtt_host", "mqtt_port", "mqtt_user",
+    static const char *const net_keys[] = {"server_host", "device_id", "mqtt_host", "mqtt_port", "mqtt_user",
                                            "mqtt_pass", "web_pin",   "log_level"};
     static const char *const bath_keys[] = {
         "clap_exits",      "cold_switch",     "cold_profile",     "hype_warm_s",    "hype_cold_s",   "hype_after_s",
@@ -111,6 +111,7 @@ static void test_names_are_unique_across_all_groups_and_settings(void)
 
 static void test_net_defaults_and_rules(void)
 {
+    TEST_ASSERT_EQUAL_STRING("", net.server_host);
     TEST_ASSERT_EQUAL_STRING("", net.device_id);
     TEST_ASSERT_EQUAL_STRING("", net.mqtt_host);
     TEST_ASSERT_EQUAL_UINT16(8883, net.mqtt_port);
@@ -133,6 +134,8 @@ static void test_net_defaults_and_rules(void)
     FAILS(cfg_net_table, net, "mqtt_host", "mqtts://example.org", KV_ERR_INVALID);
     FAILS(cfg_net_table, net, "mqtt_host", "example.org:8883", KV_ERR_INVALID);
     OK(cfg_net_table, net, "mqtt_port", "1");
+    OK(cfg_net_table, net, "server_host", "ambience.example.org");
+    FAILS(cfg_net_table, net, "server_host", "https://ambience.example.org", KV_ERR_INVALID);
     OK(cfg_net_table, net, "mqtt_port", "65535");
     FAILS(cfg_net_table, net, "mqtt_port", "0", KV_ERR_RANGE);
     FAILS(cfg_net_table, net, "mqtt_port", "65536", KV_ERR_RANGE);
@@ -225,7 +228,7 @@ static void test_bed_defaults_and_rules(void)
     TEST_ASSERT_EQUAL_UINT8(16, bed.alarm_volume);
     TEST_ASSERT_EQUAL_UINT8(9, bed.snooze_min);
     TEST_ASSERT_EQUAL_UINT8(15, bed.ring_max_min);
-    TEST_ASSERT_EQUAL_STRING("sleep", bed.sleep_folder);
+    TEST_ASSERT_EQUAL_STRING("", bed.sleep_folder);
     TEST_ASSERT_EQUAL_UINT8(30, bed.sleep_timer_min);
     TEST_ASSERT_EQUAL_UINT16(120, bed.sleep_fade_s);
     TEST_ASSERT_EQUAL_UINT8(5, bed.sleep_candle_min);
@@ -281,13 +284,13 @@ static void test_bed_defaults_and_rules(void)
     /* folders */
     OK(cfg_bed_table, bed, "mood_folder", "mood_Rain-2");
     TEST_ASSERT_EQUAL_STRING("mood_Rain-2", bed.mood_folder);
-    OK(cfg_bed_table, bed, "sleep_folder", "true_crime");
+    OK(cfg_bed_table, bed, "sleep_folder", "sleep_true_crime");
     OK(cfg_bed_table, bed, "med_folder", "abcdefghijklmnopqrstuvw"); /* 23 */
     FAILS(cfg_bed_table, bed, "med_folder", "abcdefghijklmnopqrstuvwx", KV_ERR_RANGE);
     FAILS(cfg_bed_table, bed, "sleep_folder", "true crime", KV_ERR_INVALID);
     FAILS(cfg_bed_table, bed, "sleep_folder", "a/b", KV_ERR_INVALID);
     FAILS(cfg_bed_table, bed, "mood_folder", "mood.rain", KV_ERR_INVALID);
-    OK(cfg_bed_table, bed, "sleep_folder", ""); /* no sleep music */
+    OK(cfg_bed_table, bed, "sleep_folder", ""); /* the first sleep_ folder */
     OK(cfg_bed_table, bed, "mood_folder", "");
 }
 

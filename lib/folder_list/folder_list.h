@@ -1,34 +1,42 @@
 /*
- * folder_list – the speaker's SD card folders on the bedside, put together
- * from LINK_FOLDER frames (pure C, no radio).
+ * folder_list – the bedside's copy of the folders on the speaker's SD card,
+ * put together from LINK_FOLDER frames (pure C, no hardware).
  *
  * Requirements: BED-43, BED-50 (see the requirements doc).
  * Tests:        test/test_folder_list/
  *
- * The speaker sends its folders one frame each (index 0 ... count-1) after
- * every scan and on HELLO; frames may arrive out of order or twice (retries).
+ * The speaker sends one acked LINK_FOLDER frame per folder, index 0 ...
+ * count-1, after every card scan and after a HELLO (docs/PROTOCOL.md). Acks
+ * and retries can bring frames twice or out of order.
  *
- *   Reception  A frame with index 0 and a valid name starts a reception of
- *              `count` folders, unless one with the same count is already
- *              running (a retried index 0 does not restart it). A frame with
- *              index > 0 belongs to the running reception: it is refused if
- *              none runs or its count differs. A frame seen again overwrites
- *              its name.
- *   Complete   Once the frames 0 ... min(count, FOLDER_LIST_MAX) - 1 are all
- *              in, the list replaces the current one and the reception ends.
- *              Until then the old list stays as it is.
- *   Overflow   A frame with a valid name and FOLDER_LIST_MAX <= index < count
- *              is always accepted and ignored (also with no reception
- *              running, e.g. after the first FOLDER_LIST_MAX completed).
- *   Empty card A frame with count 0 and index 0 replaces the list with an
- *              empty one at once and drops any running reception.
- *   Refused    (false, nothing changes) NULL, index >= count (other than the
- *              empty-card frame), a name that is empty or not
- *              cfg_folder_valid(), or an index > 0 without a matching
- *              reception.
+ * Two lists: the *current* list (what the functions below return) and the
+ * one being received. The current list only changes when a new list is
+ * complete, so readers never see half a list.
  *
- * ready: a complete list has arrived since init (possibly an empty one).
- * folder_list_has() compares case-sensitively against the complete list.
+ *   index 0          starts a new list of `count` folders; a list that was
+ *                    being received is dropped. Exception: while a list
+ *                    with the same count is being received, an index-0
+ *                    frame only replaces that name (a retried frame must
+ *                    not throw away the rest). count 0: the current list
+ *                    becomes empty at once (and is ready); a list being
+ *                    received is dropped.
+ *   index 1 ...      accepted only for the list being received, with the
+ *                    same count and index < count. A frame for an index
+ *                    already received replaces that name.
+ *   complete         when indexes 0 ... min(count, FOLDER_LIST_MAX) - 1 have
+ *                    all arrived: the list becomes the current one, in index
+ *                    order.
+ *   index >= FOLDER_LIST_MAX (and < count): always accepted (true) and
+ *                    ignored, whatever the state; not needed for completion.
+ *   name             must pass cfg_folder_valid() and not be "", else the
+ *                    frame is refused (false) and changes nothing.
+ *   refused (false)  NULL arguments, index >= count, no list being received
+ *                    (index > 0 without an index-0 frame since the last
+ *                    completion), count differing from the list being
+ *                    received, bad name.
+ *
+ * Plain struct so it needs no heap; its fields are private: use the
+ * functions. folder_list_init() before first use.
  */
 #ifndef FOLDER_LIST_H
 #define FOLDER_LIST_H
@@ -46,31 +54,31 @@ extern "C" {
 #define FOLDER_LIST_MAX 32
 
 typedef struct {
-    /* the complete list */
+    /* private */
+    char cur[FOLDER_LIST_MAX][LINK_FOLDER_LEN + 1];
+    size_t cur_count;
     bool ready;
-    uint8_t count;
-    char names[FOLDER_LIST_MAX][LINK_FOLDER_LEN + 1];
-    /* the reception in progress */
-    bool rx_running;
-    uint8_t rx_count;
-    uint32_t rx_have; /* bit i: frame i is in */
-    char rx_names[FOLDER_LIST_MAX][LINK_FOLDER_LEN + 1];
+    char rx[FOLDER_LIST_MAX][LINK_FOLDER_LEN + 1];
+    uint32_t rx_have; /* bit per index received */
+    uint8_t rx_count; /* count of the list being received */
+    bool rx_active;
 } folder_list_t;
 
-/* Empty, not ready, no reception. Accepts NULL. */
+/* Empty, not ready, nothing being received. Accepts NULL. */
 void folder_list_init(folder_list_t *fl);
 
-/* true if the frame was accepted (see above). */
-bool folder_list_feed(folder_list_t *fl, const link_folder_t *f);
+bool folder_list_feed(folder_list_t *fl, const link_folder_t *frame);
 
-/* false / 0 / NULL for fl NULL. */
+/* True once a complete list (also an empty one) has arrived since init. */
 bool folder_list_ready(const folder_list_t *fl);
+
+/* Folders in the current list (at most FOLDER_LIST_MAX); 0 for NULL. */
 size_t folder_list_count(const folder_list_t *fl);
 
-/* Name i of the complete list, NULL if i >= count. */
+/* Name at i of the current list, NULL if i is out of range or fl NULL. */
 const char *folder_list_name(const folder_list_t *fl, size_t i);
 
-/* false for NULL arguments. */
+/* Exact (case-sensitive) match in the current list; false for NULL. */
 bool folder_list_has(const folder_list_t *fl, const char *name);
 
 #ifdef __cplusplus

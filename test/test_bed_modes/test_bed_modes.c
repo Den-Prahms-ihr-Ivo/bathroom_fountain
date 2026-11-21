@@ -1,5 +1,5 @@
 /*
- * Tests for lib/bed_modes – requirements BED-40 ... BED-52.
+ * Tests for lib/bed_modes – requirements BED-40 ... BED-53.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -378,21 +378,38 @@ static void test_sleep_timer_zero_plays_until_stop(void)
     expect_state(BED_MODE_SLEEP, false, false);
 }
 
-static void test_sleep_press_while_playing_restarts_timer_only(void)
+static void test_sleep_press_while_playing_cycles_folder(void)
 {
     create();
     press(BED_BTN_SLEEP, T0);
     drain();
     TEST_ASSERT_TRUE(press(BED_BTN_SLEEP, T0 + 3 * MIN));
-    expect_no_cmd();
+    take(BED_CMD_SLEEP_FOLDER_NEXT);
+    expect_play(BED_MODE_SLEEP, true, true, 3000);
+    expect_no_cmd(); /* no scene */
     expect_state(BED_MODE_SLEEP, false, true);
     /* candle timer keeps its first start */
     bed_modes_tick(bm, T0 + 5 * MIN);
     expect_state(BED_MODE_SLEEP, false, false);
-    /* music timer runs from the second press */
-    bed_modes_tick(bm, T0 + 33 * MIN - 1);
+    /* switching is not extending: the timer still runs from the first press */
+    bed_modes_tick(bm, T0 + 30 * MIN - 1);
     expect_no_cmd();
-    bed_modes_tick(bm, T0 + 33 * MIN);
+    bed_modes_tick(bm, T0 + 30 * MIN);
+    expect_stop(120000);
+}
+
+static void test_sleep_folder_switches_repeatedly(void)
+{
+    create();
+    press(BED_BTN_SLEEP, T0);
+    drain();
+    for (int i = 1; i <= 3; i++) {
+        TEST_ASSERT_TRUE(press(BED_BTN_SLEEP, T0 + (uint32_t)i * MIN));
+        take(BED_CMD_SLEEP_FOLDER_NEXT);
+        expect_play(BED_MODE_SLEEP, true, true, 3000);
+        expect_no_cmd();
+    }
+    bed_modes_tick(bm, T0 + 30 * MIN);
     expect_stop(120000);
 }
 
@@ -827,7 +844,8 @@ int main(void)
     RUN_TEST(test_sleep_without_fade_ends_at_timer);
     RUN_TEST(test_sleep_candles_outlast_short_sleep_timer);
     RUN_TEST(test_sleep_timer_zero_plays_until_stop);
-    RUN_TEST(test_sleep_press_while_playing_restarts_timer_only);
+    RUN_TEST(test_sleep_press_while_playing_cycles_folder);
+    RUN_TEST(test_sleep_folder_switches_repeatedly);
     RUN_TEST(test_sleep_press_during_fade_resumes);
     RUN_TEST(test_second_sleep_of_night_continues);
     RUN_TEST(test_next_night_starts_fresh);

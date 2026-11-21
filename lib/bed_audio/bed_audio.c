@@ -1,11 +1,16 @@
 /*
  * bed_audio – bed_modes commands to speaker messages, scenes, volume slots,
- * mood folder.
+ * folders.
  * Contract in bed_audio.h, tests in test/test_bed_audio/.
  */
 #include "bed_audio.h"
 
+#include <ctype.h>
 #include <string.h>
+
+#include "mode_volume.h"
+
+#define VOLUME_MAX 32u
 
 static uint16_t to_ds(uint32_t ms)
 {
@@ -41,7 +46,7 @@ bool bed_audio_from_cmd(const bed_cmd_t *cmd, const bed_audio_ctx_t *ctx, link_a
         const int slot = bed_audio_volume_index(cmd->folder);
         const char *folder = mode_folder(ctx, cmd->folder);
         if (slot == MODE_VOLUME_NONE || folder == NULL || folder[0] == '\0' || !cfg_folder_valid(folder)
-            || ctx->volume[slot] > BED_AUDIO_VOLUME_MAX) {
+            || ctx->volume[slot] > VOLUME_MAX) {
             return false;
         }
         a.cmd = LINK_AUDIO_PLAY;
@@ -67,7 +72,7 @@ bool bed_audio_from_cmd(const bed_cmd_t *cmd, const bed_audio_ctx_t *ctx, link_a
 
 bool bed_audio_volume_msg(uint8_t step, link_audio_t *out)
 {
-    if (out == NULL || step > BED_AUDIO_VOLUME_MAX) {
+    if (out == NULL || step > VOLUME_MAX) {
         return false;
     }
     memset(out, 0, sizeof(*out));
@@ -90,9 +95,9 @@ int bed_audio_volume_index(bed_mode_t mode)
     }
 }
 
-const char *bed_audio_volume_key(int slot)
+const char *bed_audio_volume_key(int index)
 {
-    switch (slot) {
+    switch (index) {
     case BED_VOL_MEDITATION:
         return "vol_med";
     case BED_VOL_MOOD:
@@ -109,10 +114,10 @@ static const char *non_empty(const char *s)
     return (s != NULL && s[0] != '\0') ? s : NULL;
 }
 
-const char *bed_audio_scene(bed_scene_t scene, const cfg_bed_t *bed, const char *normal_scene)
+const char *bed_audio_scene(bed_scene_t scene, const cfg_bed_t *bed, const char *scene_normal)
 {
     if (scene == BED_SCENE_NORMAL) {
-        return non_empty(normal_scene);
+        return non_empty(scene_normal);
     }
     if (bed == NULL) {
         return NULL;
@@ -133,49 +138,62 @@ static bool copy_out(const char *name, char *out, size_t out_size)
 {
     const size_t len = strlen(name);
     if (len + 1 > out_size) {
-        if (out_size > 0) {
-            out[0] = '\0';
-        }
+        out[0] = '\0';
         return false;
     }
     memcpy(out, name, len + 1);
     return true;
 }
 
-static bool next_on_list(const folder_list_t *list, const char *current, char *out, size_t out_size)
+static bool has_prefix(const char *s, const char *prefix)
+{
+    for (; *prefix != '\0'; s++, prefix++) {
+        if (*s == '\0' || tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool next_on_list(const folder_list_t *list, const char *current, const char *prefix, char *out,
+                         size_t out_size)
 {
     const char *names[FOLDER_LIST_MAX];
     const size_t n = folder_list_count(list);
     for (size_t i = 0; i < n; i++) {
         names[i] = folder_list_name(list, i);
     }
-    return bed_next_folder(names, n, current, BED_AUDIO_MOOD_PREFIX, out, out_size);
+    return bed_next_folder(names, n, current, prefix, out, out_size);
 }
 
-bool bed_audio_pick_mood(const folder_list_t *list, const char *current, char *out, size_t out_size)
+bool bed_audio_pick_folder(const folder_list_t *list, const char *current, const char *prefix, char *out,
+                           size_t out_size)
 {
-    if (out != NULL && out_size > 0) {
-        out[0] = '\0';
+    if (out == NULL || out_size == 0) {
+        return false;
     }
-    if (list == NULL || current == NULL || out == NULL) {
+    out[0] = '\0';
+    if (list == NULL || current == NULL || prefix == NULL) {
         return false;
     }
     if (!folder_list_ready(list)) {
         return current[0] != '\0' && copy_out(current, out, out_size);
     }
-    if (current[0] != '\0' && folder_list_has(list, current)) {
+    if (current[0] != '\0' && has_prefix(current, prefix) && folder_list_has(list, current)) {
         return copy_out(current, out, out_size);
     }
-    return next_on_list(list, current, out, out_size);
+    return next_on_list(list, current, prefix, out, out_size);
 }
 
-bool bed_audio_next_mood(const folder_list_t *list, const char *current, char *out, size_t out_size)
+bool bed_audio_next_folder(const folder_list_t *list, const char *current, const char *prefix, char *out,
+                           size_t out_size)
 {
-    if (out != NULL && out_size > 0) {
-        out[0] = '\0';
-    }
-    if (list == NULL || current == NULL || out == NULL || !folder_list_ready(list)) {
+    if (out == NULL || out_size == 0) {
         return false;
     }
-    return next_on_list(list, current, out, out_size);
+    out[0] = '\0';
+    if (list == NULL || current == NULL || prefix == NULL || !folder_list_ready(list)) {
+        return false;
+    }
+    return next_on_list(list, current, prefix, out, out_size);
 }

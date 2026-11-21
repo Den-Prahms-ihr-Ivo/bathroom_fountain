@@ -374,6 +374,57 @@ static void test_too_long_for_mqtt(void)
     TEST_ASSERT_EQUAL_size_t(STATUS_JSON_MAX, status_json_event_error("", big_text, -1, big_out, sizeof(big_out)));
 }
 
+/* ---- crate -------------------------------------------------------------- */
+
+static void test_crate(void)
+{
+    c.groups[2] = NULL;
+    c.group_count = 2;
+    status_crate_t cr;
+    memset(&cr, 0, sizeof(cr));
+    cr.state = STATUS_CRATE_OPEN;
+    cr.light = 600;
+    cr.playing = true;
+    cr.volume = 14;
+    cr.battery_mv = 13120;
+    cr.battery = STATUS_BATT_OK;
+    cr.sd = "ok";
+    cr.tracks = 1;
+    expect("{\"online\":true,\"node\":\"crate\",\"fw\":\"2.0.0\",\"built\":\"2026-11-15T14:02:11Z\","
+           "\"boot\":17,\"reset\":\"poweron\",\"uptime_s\":8123,\"wifi_rssi\":-58,\"ip\":\"192.168.1.40\","
+           "\"heap_min\":141232,\"groups\":[\"settings\",\"net\"],\"settings_version\":12,"
+           "\"state\":\"open\",\"light\":600,\"playing\":true,\"volume\":14,\"battery_mv\":13120,"
+           "\"battery\":\"ok\",\"sd\":\"ok\",\"tracks\":1}",
+           status_json_crate(&c, &cr, out, sizeof(out)));
+    const status_crate_state_t states[] = {STATUS_CRATE_CLOSED, STATUS_CRATE_DIM, STATUS_CRATE_CLOSING};
+    const char *names[] = {"\"state\":\"closed\"", "\"state\":\"dim\"", "\"state\":\"closing\""};
+    for (int i = 0; i < 3; i++) {
+        cr.state = states[i];
+        TEST_ASSERT_TRUE(status_json_crate(&c, &cr, out, sizeof(out)) > 0);
+        TEST_ASSERT_NOT_NULL(strstr(out, names[i]));
+    }
+    cr.battery = STATUS_BATT_LOW;
+    status_json_crate(&c, &cr, out, sizeof(out));
+    TEST_ASSERT_NOT_NULL(strstr(out, "\"battery\":\"low\""));
+    cr.battery = (status_battery_t)3;
+    expect_fail(status_json_crate(&c, &cr, out, sizeof(out)));
+    cr.battery = STATUS_BATT_OK;
+    cr.state = (status_crate_state_t)4;
+    expect_fail(status_json_crate(&c, &cr, out, sizeof(out)));
+    expect_fail(status_json_crate(NULL, &cr, out, sizeof(out)));
+    expect_fail(status_json_crate(&c, NULL, out, sizeof(out)));
+}
+
+static void test_crate_asleep(void)
+{
+    expect("{\"online\":false,\"node\":\"crate\",\"asleep\":true,\"battery_mv\":12950,\"battery\":\"ok\"}",
+           status_json_crate_asleep(12950, STATUS_BATT_OK, out, sizeof(out)));
+    expect("{\"online\":false,\"node\":\"crate\",\"asleep\":true,\"battery_mv\":12100,\"battery\":\"empty\"}",
+           status_json_crate_asleep(12100, STATUS_BATT_EMPTY, out, sizeof(out)));
+    expect_fail(status_json_crate_asleep(12100, (status_battery_t)7, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_size_t(0, status_json_crate_asleep(12100, STATUS_BATT_OK, out, 10));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -393,6 +444,8 @@ int main(void)
     RUN_TEST(test_event_alarm);
     RUN_TEST(test_event_error_and_cmd);
     RUN_TEST(test_too_long_for_mqtt);
+    RUN_TEST(test_crate);
+    RUN_TEST(test_crate_asleep);
     return UNITY_END();
 }
 

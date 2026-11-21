@@ -82,6 +82,7 @@ bool cfg_folder_valid(const char *name)
 /* ---- net ---------------------------------------------------------------- */
 
 static const kv_key_t net_keys[] = {
+    {"server_host", KV_TEXT, KV_FIELD(cfg_net_t, server_host), 1, 63, NULL, NULL, host_check},
     {"device_id", KV_TEXT, KV_FIELD(cfg_net_t, device_id), 1, 24, NULL, NULL, device_id_check},
     {"mqtt_host", KV_TEXT, KV_FIELD(cfg_net_t, mqtt_host), 1, 63, NULL, NULL, host_check},
     {"mqtt_port", KV_UINT, KV_FIELD(cfg_net_t, mqtt_port), 1, 65535, "8883", NULL, NULL},
@@ -136,7 +137,7 @@ static const kv_key_t bed_keys[] = {
     {"alarm_volume", KV_UINT, KV_FIELD(cfg_bed_t, alarm_volume), 1, 32, "16", NULL, NULL},
     {"snooze_min", KV_UINT, KV_FIELD(cfg_bed_t, snooze_min), 1, 30, "9", NULL, NULL},
     {"ring_max_min", KV_UINT, KV_FIELD(cfg_bed_t, ring_max_min), 1, 60, "15", NULL, NULL},
-    {"sleep_folder", KV_TEXT, KV_FIELD(cfg_bed_t, sleep_folder), 1, 23, "sleep", NULL, folder_chars_check},
+    {"sleep_folder", KV_TEXT, KV_FIELD(cfg_bed_t, sleep_folder), 1, 23, NULL, NULL, folder_chars_check},
     {"sleep_timer_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_timer_min), 0, 240, "30", NULL, NULL},
     {"sleep_fade_s", KV_UINT, KV_FIELD(cfg_bed_t, sleep_fade_s), 0, 600, "120", NULL, NULL},
     {"sleep_candle_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_candle_min), 0, 120, "5", NULL, NULL},

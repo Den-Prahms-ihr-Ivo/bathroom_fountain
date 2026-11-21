@@ -21,6 +21,9 @@
  *
  * Group "net" (cfg_net_t) – identity and server link
  *   key          type    range / syntax                         default
+ *   server_host  text    1-63 of letters, digits, '.', '-'      ""  (the firmware's
+ *                        build default is written here at first boot; pairing
+ *                        talks HTTPS to it, lib/enroll)
  *   device_id    text    1-24 of a-z 0-9 '-'                    ""  (unset)
  *   mqtt_host    text    1-63 of letters, digits, '.', '-'      ""  (unset)
  *   mqtt_port    uint    1-65535                                8883
@@ -56,7 +59,10 @@
  *   alarm_volume     uint    1-32                               16
  *   snooze_min       uint    1-30                               9
  *   ring_max_min     uint    1-60                               15
- *   sleep_folder     folder  sleep music (lib/bed_modes)        sleep
+ *   sleep_folder     folder  current sleep folder; the sleep    ""
+ *                            button while sleep plays moves it
+ *                            to the next "sleep_" folder.
+ *                            "" = the first one
  *   sleep_timer_min  uint    0-240, 0 = no timer                30
  *   sleep_fade_s     uint    0-600, fade-out after the timer    120
  *   sleep_candle_min uint    0-120, candles at the night's      5
@@ -73,7 +79,7 @@
  *   scene_wake       uuid                                       ""
  *   The meditation timer's end recalls scene_normal (lib/settings).
  *   folder = text, 0-23 characters of A-Z a-z 0-9 '_' '-' (cfg_folder_valid);
- *   "" means "no music" for sleep_folder and med_folder.
+ *   "" means "no music" for med_folder.
  *
  * Group "game" (cfg_game_t) – alarm game, on the bedside node
  *   key            type    range                                default
@@ -112,6 +118,7 @@ typedef enum {
 } cfg_log_level_t;
 
 typedef struct {
+    char server_host[64];
     char device_id[25];
     char mqtt_host[64];
     uint16_t mqtt_port;

@@ -2,7 +2,7 @@
  * crate_controller – the holy crate: lid open = light and choir, lid closed =
  * fade out and sleep (pure C, no hardware).
  *
- * Requirements: CRATE-01 ... CRATE-10 (listed in docs/CRATE.md); CRATE-11
+ * Requirements: CRATE-01 ... CRATE-10, CRATE-13 (listed in docs/CRATE.md); CRATE-11
  *               (volume encoder) is the app's, with lib/volume.
  * Tests:        test/test_crate_controller/
  *
@@ -71,6 +71,16 @@
  *   the app must sleep with "lid closes" as its wake source, or the lid wakes
  *   it at once again.
  *
+ * Busy (crate_controller_busy(), CRATE-13)
+ *   The crate is online whenever it is awake. The app reports busy = true
+ *   while a music download (cmd/music/sync) or a firmware update runs. Busy
+ *   changes no light, volume, music or state: it only delays sleep_ok in
+ *   CRATE_CLOSED, for at most cfg.busy_max_ms after the sleep delay ended
+ *   (counted from the moment sleep_ok would have become true without it).
+ *   Busy turning false lets sleep_ok become true at once (if the delay is
+ *   over). With the battery EMPTY, busy is ignored: the battery comes first.
+ *   Starts not busy.
+ *
  * Events are taken once each, in order (at most CRATE_EVENTS wait; the
  * oldest is dropped).
  */
@@ -99,6 +109,7 @@ typedef struct {
     uint16_t warn_mv;           /* cutoff_mv ... 14000     default 12800  */
     uint16_t battery_hold_ms;   /* 1000 ... 60000          default 10000  */
     uint16_t sleep_delay_ms;    /* 0 ... 60000             default 2000   */
+    uint32_t busy_max_ms;       /* 0 ... 3600000           default 600000 (10 min) */
 } crate_config_t;
 
 typedef enum {
@@ -146,6 +157,8 @@ void crate_controller_destroy(crate_controller_t *cc);
 
 void crate_controller_lid(crate_controller_t *cc, bool open_raw, uint32_t now_ms);
 void crate_controller_battery(crate_controller_t *cc, uint16_t battery_mv, uint32_t now_ms);
+
+void crate_controller_busy(crate_controller_t *cc, bool busy, uint32_t now_ms);
 
 /* Call regularly (e.g. every 20 ms). */
 void crate_controller_tick(crate_controller_t *cc, uint32_t now_ms);

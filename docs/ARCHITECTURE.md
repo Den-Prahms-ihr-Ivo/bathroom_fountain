@@ -46,7 +46,7 @@ Three links, three jobs:
 
 | Layer | Where | Depends on | Tested by |
 | --- | --- | --- | --- |
-| Pure logic: decisions, signal processing, codecs | `lib/<module>/` | C standard library (two modules also cJSON) | `pio test -e native` on your PC |
+| Pure logic: decisions, signal processing, codecs | `lib/<module>/` | C standard library (three modules also cJSON) | `pio test -e native` on your PC |
 | Platform: drivers and services every node can use | `src/platform/` | ESP-IDF | on the board |
 | App: one node's tasks, pins and wiring of modules | `src/app/<node>/` | ESP-IDF, platform, lib | on the board |
 
@@ -86,7 +86,7 @@ src/
 
 ## Library modules
 
-"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). "v2.1" modules came with the bedside buttons and per-mode volume (61 tests, implemented). "v2.2" modules hold the logic of the bedside, speaker and bath glue and the status documents, so the apps stay thin; "v2.3" modules are pairing with the server and the settings schema. For both, contracts and tests are written and the code is a stub to replace (v2.2: 92 tests, v2.3: 41 tests, red until then).
+"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). "v2.1" modules came with the bedside buttons and per-mode volume (61 tests, implemented). "v2.2" modules hold the logic of the bedside, speaker and bath glue and the status documents, so the apps stay thin; "v2.3" modules are pairing with the server and the settings schema. Both are implemented (v2.2: 92 tests, v2.3: 41 tests).
 
 | Module | Used by | Job | State |
 | --- | --- | --- | --- |
@@ -116,19 +116,19 @@ src/
 | `bed_modes` | bedside | meditation, mood, sleep, next, stop; nights; candles | v2.1 |
 | `mode_volume` | bath, bedside | one encoder volume per music mode | v2.1 |
 | `resume_point` | speaker | where the sleep session stopped, as an NVS blob | v2.1 |
-| `folder_list` | bedside | the speaker's folders, from `LINK_FOLDER` frames | v2.2 (stub) |
-| `bed_audio` | bedside | `bed_modes` commands → `LINK_AUDIO`, scene ids, volume slots and keys, mood folder | v2.2 (stub) |
-| `speaker_session` | speaker | `LINK_AUDIO`, alarm and standby → start / save / halt / next, fade level | v2.2 (stub) |
-| `resume_restore` | speaker | capture a resume point; find it again in a rebuilt playlist | v2.2 (stub) |
-| `bath_volume` | bath | which volume slot the encoder sets, NVS keys | v2.2 (stub) |
-| `status_json` | bath, speaker, bedside | status documents and mode / alarm / error / cmd events | v2.2 (stub) |
-| `enroll`, `enroll_msg` | every Wi-Fi node | pairing with the server: hello, 3 s hold, credentials | v2.3 (stub) |
-| `settings_schema` | every Wi-Fi node | how the web app draws each settings group | v2.3 (stub) |
+| `folder_list` | bedside | the speaker's folders, from `LINK_FOLDER` frames | v2.2 |
+| `bed_audio` | bedside | `bed_modes` commands → `LINK_AUDIO`, scene ids, volume slots and keys, mood folder | v2.2 |
+| `speaker_session` | speaker | `LINK_AUDIO`, alarm and standby → start / save / halt / next, fade level | v2.2 |
+| `resume_restore` | speaker | capture a resume point; find it again in a rebuilt playlist | v2.2 |
+| `bath_volume` | bath | which volume slot the encoder sets, NVS keys | v2.2 |
+| `status_json` | bath, speaker, bedside | status documents and mode / alarm / error / cmd events | v2.2 |
+| `enroll`, `enroll_msg` | every Wi-Fi node | pairing with the server: hello, 3 s hold, credentials | v2.3 |
+| `settings_schema` | every Wi-Fi node | how the web app draws each settings group | v2.3 |
 | `pulse_code` | gun, target | the coded laser burst | v2 |
 | `gun_logic` | gun | trigger, magazine, sights, sleep | v2 |
 | `target_logic` | target | lit / hit / timeout, sleep plan | v2 |
 
-Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `mode_volume → volume`; `bed_audio → bed_modes, folder_list, link_msg, node_config, mode_volume`; `folder_list, speaker_session → link_msg, node_config`; `resume_restore → playlist, resume_point`; `bath_volume → mode_controller, mode_volume`; `status_json, settings_schema → cjson`; `enroll → enroll_msg → cjson, node_config`; `settings_schema → kv_table`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
+Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `mode_volume → volume`; `bed_audio → bed_modes, folder_list, link_msg, node_config, mode_volume`; `folder_list, speaker_session → link_msg, node_config`; `resume_restore → playlist, resume_point`; `bath_volume → mode_controller, mode_volume`; `settings_schema → cjson`; `enroll → enroll_msg → cjson, node_config`; `settings_schema → kv_table`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
 
 ## Settings
 

@@ -9,6 +9,8 @@
 
 #include "node_config.h"
 
+#define VOLUME_MAX 32u /* volume steps, as on the link */
+
 struct speaker_session {
     spk_outputs_t out;
 
@@ -25,7 +27,7 @@ struct speaker_session {
 
 static uint8_t clamp_volume(uint8_t v)
 {
-    return (v > SPK_VOLUME_MAX) ? SPK_VOLUME_MAX : v;
+    return (v > VOLUME_MAX) ? VOLUME_MAX : v;
 }
 
 speaker_session_t *speaker_session_create(uint8_t volume, uint32_t now_ms)
@@ -139,7 +141,7 @@ static bool on_play(speaker_session_t *s, const link_audio_t *m, uint32_t now_ms
     char folder[LINK_FOLDER_LEN + 1];
     memcpy(folder, m->folder, LINK_FOLDER_LEN);
     folder[LINK_FOLDER_LEN] = '\0';
-    if (folder[0] == '\0' || !cfg_folder_valid(folder) || m->volume > SPK_VOLUME_MAX) {
+    if (folder[0] == '\0' || !cfg_folder_valid(folder) || m->volume > VOLUME_MAX) {
         return false;
     }
 
@@ -194,7 +196,7 @@ bool speaker_session_audio(speaker_session_t *s, const link_audio_t *m, uint32_t
     catch_up(s, now_ms);
 
     if (m->cmd == LINK_AUDIO_VOLUME) {
-        if (m->volume > SPK_VOLUME_MAX) {
+        if (m->volume > VOLUME_MAX) {
             return false;
         }
         s->out.volume = m->volume;
