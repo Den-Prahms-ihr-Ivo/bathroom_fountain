@@ -16,9 +16,6 @@
 #include "board_pins.h"
 #include "button.h"
 #include "events.h"
-#if !defined(INPUT_NO_HUE_PAIRING)
-#include "hue_task.h"
-#endif
 
 #define INPUT_POLL_MS      10   /* one tick at the default 100 Hz; plenty for a 30 ms debounce */
 #define INPUT_TASK_STACK   3072u
@@ -159,12 +156,10 @@ static void input_task(void *arg)
             events_post(EVT_BUTTON, 0);
             break;
         case BUTTON_LONG:
-#if defined(INPUT_NO_HUE_PAIRING)
-            events_post(EVT_BUTTON, 0); /* no Hue on this node: a long press is a press */
-#else
-            ESP_LOGI(TAG, "long press: Hue pairing (press the bridge's link button)");
-            hue_task_request_pairing();
-#endif
+            /* The app decides: server pairing if a confirm window is open
+             * (enroll_task_button_held), else Hue pairing (bath), next track
+             * (crate), standby (speaker). */
+            events_post(EVT_LONG_PRESS, 0);
             break;
         case BUTTON_NONE:
             break;

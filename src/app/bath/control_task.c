@@ -17,10 +17,13 @@
 #include "amp_volume.h"
 #include "app_settings.h"
 #include "app_status.h"
+#include "bath_volume.h"
 #include "board_pins.h"
+#include "enroll_task.h"
 #include "events.h"
 #include "hue_task.h"
 #include "mode_controller.h"
+#include "mode_volume.h"
 #include "outputs.h"
 #include "player_task.h"
 #include "tas5825m.h"
@@ -35,13 +38,13 @@
 #define FAULT_POLL_MS       2000u  /* while the amplifier is on */
 
 #define STATE_NVS_NAMESPACE "state"
-#define VOLUME_NVS_KEY      "volume"
+/* volume keys: bath_volume_key(slot) ("volume" = Ambient, as in v1; "vol_cold") */
 
 static const char *TAG = "control";
 
 typedef struct {
     mode_controller_t *mc;
-    volume_t *vol;
+    mode_volume_t *vol;      /* BATH_VOL_COUNT slots, lib/bath_volume */
     outputs_t *outs;
     tas5825m_t *amp;
     nvs_handle_t nvs;
@@ -95,12 +98,15 @@ static bool control_init(void)
     }
 
     s_ctl.nvs_open = (nvs_open(STATE_NVS_NAMESPACE, NVS_READWRITE, &s_ctl.nvs) == ESP_OK);
-    uint8_t saved_step = 0;
-    const bool has_saved = s_ctl.nvs_open && nvs_get_u8(s_ctl.nvs, VOLUME_NVS_KEY, &saved_step) == ESP_OK;
+    uint8_t saved[BATH_VOL_COUNT] = {0};
+    bool has_saved[BATH_VOL_COUNT] = {false};
+    for (int i = 0; i < BATH_VOL_COUNT; i++) {
+        has_saved[i] = s_ctl.nvs_open && nvs_get_u8(s_ctl.nvs, bath_volume_key(i), &saved[i]) == ESP_OK;
+    }
 
     outputs_gpio_init();
     s_ctl.mc = mode_controller_create(&mode_cfg, now);
-    s_ctl.vol = volume_create(&vol_cfg, has_saved, saved_step);
+    s_ctl.vol = mode_volume_create(&vol_cfg, BATH_VOL_COUNT, has_saved, saved);
     s_ctl.outs = outputs_create();
     s_ctl.amp = tas5825m_create(amp_io_get());
     if (s_ctl.mc == NULL || s_ctl.vol == NULL || s_ctl.outs == NULL || s_ctl.amp == NULL) {
@@ -110,13 +116,37 @@ static bool control_init(void)
     app_status_t *st = app_status_lock();
     st->volume_max = vol_cfg.max_step;
     app_status_unlock();
-    ESP_LOGI(TAG, "transition %lu ms, auto exit after %lu s, volume step %u of %u%s",
+    ESP_LOGI(TAG, "transition %lu ms, auto exit after %lu s, volume steps ambient %u%s / cold %u%s of %u",
              (unsigned long)mode_cfg.transition_ms, (unsigned long)(mode_cfg.max_ambient_ms / 1000u),
-             (unsigned)volume_step(s_ctl.vol), (unsigned)vol_cfg.max_step, has_saved ? " (saved)" : "");
+             (unsigned)mode_volume_step(s_ctl.vol, BATH_VOL_AMBIENT), has_saved[BATH_VOL_AMBIENT] ? " (saved)" : "",
+             (unsigned)mode_volume_step(s_ctl.vol, BATH_VOL_COLD), has_saved[BATH_VOL_COLD] ? " (saved)" : "",
+             (unsigned)vol_cfg.max_step);
     return true;
 }
 
 /* --------------------------------------------------------------- events --- */
+
+/* TODO(cold): true while cold_session / cold_protocol runs (any phase). The
+ * cold shower is not wired into control_task yet, so the cold slot is never
+ * picked; the encoder sets the Ambient volume as before. */
+static bool cold_running(void)
+{
+    return false;
+}
+
+/* The slot the encoder sets now (MODE_VOLUME_NONE: quiet Normal). */
+static int volume_slot(void)
+{
+    return bath_volume_mode(mode_controller_outputs(s_ctl.mc), cold_running());
+}
+
+/* The slot whose gain goes to the amplifier: in quiet Normal the music is off
+ * anyway; the Ambient gain keeps the fade-in of the next Ambient right. */
+static int gain_slot(void)
+{
+    const int slot = volume_slot();
+    return slot == MODE_VOLUME_NONE ? BATH_VOL_AMBIENT : slot;
+}
 
 static void handle_event(const event_t *ev, uint32_t now)
 {
@@ -130,9 +160,21 @@ static void handle_event(const event_t *ev, uint32_t now)
                  !ok ? "ignored" : (ambient ? "entering Ambient" : "leaving Ambient"));
         break;
     }
-    case EVT_VOLUME:
-        volume_turn(s_ctl.vol, ev->detents, now);
-        ESP_LOGI(TAG, "volume step %u", (unsigned)volume_step(s_ctl.vol));
+    case EVT_VOLUME: {
+        const int slot = volume_slot();
+        if (mode_volume_turn(s_ctl.vol, slot, ev->detents, now)) {
+            ESP_LOGI(TAG, "volume %s step %u", bath_volume_name(slot), (unsigned)mode_volume_step(s_ctl.vol, slot));
+        } else {
+            ESP_LOGI(TAG, "volume: nothing plays, ignored");
+        }
+        break;
+    }
+    case EVT_LONG_PRESS:
+        /* 3 s: server pairing while a confirm window is open, else Hue pairing */
+        if (!enroll_task_button_held()) {
+            ESP_LOGI(TAG, "long press: Hue pairing (press the bridge's link button)");
+            hue_task_request_pairing();
+        }
         break;
     }
 }
@@ -187,7 +229,7 @@ static bool is_amp_action(const output_action_t *a)
 static void apply_outputs(uint32_t now)
 {
     outputs_state_t want;
-    outputs_want_from_mode(mode_controller_outputs(s_ctl.mc), volume_gain(s_ctl.vol), &want);
+    outputs_want_from_mode(mode_controller_outputs(s_ctl.mc), mode_volume_gain(s_ctl.vol, gain_slot()), &want);
 
     output_action_t actions[OUTPUTS_MAX_ACTIONS];
     const size_t n = outputs_plan(s_ctl.outs, &want, actions);
@@ -237,7 +279,7 @@ static void poll_amp_faults(uint32_t now)
 static void publish_status(void)
 {
     const mode_outputs_t *o = mode_controller_outputs(s_ctl.mc);
-    const uint8_t step = volume_step(s_ctl.vol);
+    const uint8_t step = mode_volume_step(s_ctl.vol, gain_slot()); /* TODO(status_json): both volumes */
     const bool powered = tas5825m_is_powered(s_ctl.amp);
     const uint8_t addr = amp_io_address();
     app_status_t *st = app_status_lock();
@@ -263,18 +305,19 @@ static void forward_hue_command(void)
 
 static void save_volume(uint32_t now)
 {
+    int slot;
     uint8_t step;
-    if (!volume_take_save(s_ctl.vol, now, &step)) {
-        return;
-    }
-    esp_err_t err = s_ctl.nvs_open ? nvs_set_u8(s_ctl.nvs, VOLUME_NVS_KEY, step) : ESP_ERR_NVS_INVALID_HANDLE;
-    if (err == ESP_OK) {
-        err = nvs_commit(s_ctl.nvs);
-    }
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "volume step %u saved", (unsigned)step);
-    } else {
-        ESP_LOGW(TAG, "volume step %u not saved: %s", (unsigned)step, esp_err_to_name(err));
+    while (mode_volume_take_save(s_ctl.vol, now, &slot, &step)) {
+        esp_err_t err = s_ctl.nvs_open ? nvs_set_u8(s_ctl.nvs, bath_volume_key(slot), step) : ESP_ERR_NVS_INVALID_HANDLE;
+        if (err == ESP_OK) {
+            err = nvs_commit(s_ctl.nvs);
+        }
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "volume %s step %u saved", bath_volume_name(slot), (unsigned)step);
+        } else {
+            ESP_LOGW(TAG, "volume %s step %u not saved: %s", bath_volume_name(slot), (unsigned)step,
+                     esp_err_to_name(err));
+        }
     }
 }
 

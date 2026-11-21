@@ -69,7 +69,7 @@ extern "C" {
 #endif
 
 #define LINK_PEER_QUEUE 4
-#define LINK_PEER_FRAME_MAX 32
+#define LINK_PEER_FRAME_MAX 34 /* = LINK_FRAME_MAX: an AUDIO frame with its folder */
 #define LINK_PEER_DEDUPE 8
 #define LINK_PEER_EVENTS 8
 

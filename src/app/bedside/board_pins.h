@@ -26,6 +26,7 @@
 #define PIN_ENC_A    1
 #define PIN_ENC_B    2
 #define PIN_ENC_SW  42
+#define PIN_BUTTON  PIN_ENC_SW /* input_task polls it; the push has no job yet (EVT_BUTTON ignored) */
 
 /* Big button: short = snooze, long = alarm off */
 #define PIN_BUTTON_ALARM  47

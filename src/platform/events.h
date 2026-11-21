@@ -14,6 +14,7 @@ typedef enum {
     EVT_CLAP = 0,  /* confirmed double clap */
     EVT_BUTTON,    /* short press */
     EVT_VOLUME,    /* encoder turned by `detents` (positive = louder) */
+    EVT_LONG_PRESS, /* button held 3 s: the app decides (pairing, Hue pairing, ...) */
 } event_type_t;
 
 typedef struct {

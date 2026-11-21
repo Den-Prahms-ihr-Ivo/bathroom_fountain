@@ -12,7 +12,11 @@
  *   sleep   outputs.sleep_ok -> amplifier PDN held low, ext0 wake on the lid,
  *           deep sleep. A wake-up is a fresh boot.
  * Every 2 s: battery voltage from the 1 MOhm / 220 kOhm divider.
- * Encoder: turn = volume (saved in NVS), press = next track.
+ * Encoder: turn = volume (saved in NVS), press = next track; held 3 s with
+ * the lid open while the server offers pairing = confirm (strip pulses).
+ * Wi-Fi / MQTT run while awake: a music sync keeps the closed crate awake
+ * (crate_controller_busy, at most busy_max_ms); right before deep sleep a
+ * retained {"online":false,"asleep":true,...} status replaces the last will.
  */
 #include "crate_task.h"
 
@@ -36,10 +40,14 @@
 #include "amp_volume.h"
 #include "board_pins.h"
 #include "crate_controller.h"
+#include "enroll_task.h"
 #include "events.h"
 #include "fade_curve.h"
 #include "light_ramp.h"
+#include "mqtt_link.h"
+#include "music_sync.h"
 #include "player_task.h"
+#include "status_json.h"
 #include "tas5825m.h"
 #include "volume.h"
 
@@ -66,6 +74,8 @@
 #define BLINK_PHASE_MS    150u
 #define BLINK_PHASES      5u      /* off, on, off, on, off */
 #define BLINK_LEVEL       400u    /* per mille while "on"  */
+#define PAIR_PULSE_MS     600u    /* strip pulse while a pairing window is open */
+#define ASLEEP_WAIT_MS    1500u   /* broker ack for the asleep status */
 
 #define STATE_NVS_NAMESPACE "state"
 #define VOLUME_NVS_KEY      "volume"
@@ -88,6 +98,7 @@ typedef struct {
     adc_cali_handle_t cali;
     bool cali_ok;
     uint32_t next_battery;
+    uint16_t last_mv;
 
     uint16_t light_target, light_ms;
     uint16_t vol_target, vol_ms;
@@ -294,9 +305,27 @@ static void save_volume(uint32_t now, bool force)
     }
 }
 
+/* Retained status instead of the last will: the web app shows "asleep"
+ * with the battery, not "offline". Best effort: no broker, no wait. */
+static void publish_asleep(void)
+{
+    if (!mqtt_link_connected()) {
+        return;
+    }
+    char json[128];
+    const status_battery_t b = (status_battery_t)crate_controller_outputs(s_crate.cc)->battery; /* same order */
+    if (status_json_crate_asleep(s_crate.last_mv, b, json, sizeof(json)) > 0) {
+        if (!mqtt_link_publish_and_wait(MQTT_TOPIC_STATUS, json, ASLEEP_WAIT_MS)) {
+            ESP_LOGW(TAG, "asleep status not confirmed");
+        }
+    }
+    mqtt_link_stop(); /* clean DISCONNECT: the broker drops the will */
+}
+
 static void go_to_sleep(uint32_t now)
 {
     save_volume(now, true);
+    publish_asleep();
     player_play(false);
     if (s_crate.amp && tas5825m_is_powered(s_crate.amp)) {
         tas5825m_power_down(s_crate.amp);
@@ -337,6 +366,12 @@ static void handle_inputs(uint32_t now)
             volume_turn(s_crate.vol, ev.detents, now);
             ESP_LOGI(TAG, "volume step %u", (unsigned)volume_step(s_crate.vol));
             break;
+        case EVT_LONG_PRESS:
+            /* lid open and the server offers pairing: confirm; else a press */
+            if (crate_controller_outputs(s_crate.cc)->lid_open && enroll_task_button_held()) {
+                break;
+            }
+            /* fall through */
         case EVT_BUTTON:
             if (crate_controller_outputs(s_crate.cc)->music_playing) {
                 player_next();
@@ -396,6 +431,12 @@ static void update_led(uint32_t now)
             duty = (phase % 2u) ? light_ramp_duty(&s_crate.light_cfg, BLINK_LEVEL) : 0;
         }
     }
+    if (!s_crate.blinking && enroll_task_blink()) {
+        /* pairing window: pulse between dark and the current level */
+        const uint32_t ph = now % (2u * PAIR_PULSE_MS);
+        const uint32_t tri = ph < PAIR_PULSE_MS ? ph : 2u * PAIR_PULSE_MS - ph;
+        duty = (uint16_t)((uint32_t)duty * tri / PAIR_PULSE_MS);
+    }
     led_set(duty);
 }
 
@@ -415,9 +456,11 @@ static void crate_task(void *arg)
             s_crate.next_battery = now + BATTERY_PERIOD_MS;
             const uint16_t mv = battery_mv();
             if (mv > 0) {
+                s_crate.last_mv = mv;
                 crate_controller_battery(s_crate.cc, mv, now);
             }
         }
+        crate_controller_busy(s_crate.cc, music_sync_running(), now); /* TODO: || OTA running */
         crate_controller_tick(s_crate.cc, now);
         handle_events(now);
 
