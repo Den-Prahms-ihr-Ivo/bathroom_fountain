@@ -43,13 +43,14 @@ static void round_trip(void)
 
 static void test_payload_sizes(void)
 {
-    const size_t sizes[] = {18, 2, 8, 18, 7, 5, 4, 4, 4, 5, 3};
-    for (int t = LINK_HELLO; t <= LINK_GUN_EVT; t++) {
+    const size_t sizes[] = {18, 2, 8, 18, 7, 5, 28, 4, 4, 5, 3, 25};
+    for (int t = LINK_HELLO; t <= LINK_FOLDER; t++) {
         TEST_ASSERT_EQUAL_size_t(sizes[t - 1], link_msg_payload_size((link_type_t)t));
         TEST_ASSERT_TRUE(LINK_HEADER_SIZE + sizes[t - 1] <= LINK_FRAME_MAX);
     }
     TEST_ASSERT_EQUAL_size_t(0, link_msg_payload_size((link_type_t)0));
-    TEST_ASSERT_EQUAL_size_t(0, link_msg_payload_size((link_type_t)12));
+    TEST_ASSERT_EQUAL_size_t(0, link_msg_payload_size((link_type_t)13));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(LINK_FRAME_MAX, LINK_HEADER_SIZE + 28, "AUDIO is the longest frame");
 }
 
 static void test_hello_bytes(void)
@@ -164,16 +165,75 @@ static void test_ring_messages(void)
     TEST_ASSERT_EQUAL_UINT8(2, out.u.ring_state.state);
     TEST_ASSERT_EQUAL_UINT8(3, out.u.ring_state.reason);
     TEST_ASSERT_EQUAL_UINT16(600, out.u.ring_state.ring_s);
+}
 
+static void test_audio_bytes(void)
+{
+    in.type = LINK_AUDIO;
+    in.flags = LINK_FLAG_ACK_REQ;
+    in.seq = 0x0102;
+    in.u.audio.cmd = LINK_AUDIO_PLAY;
+    in.u.audio.flags = LINK_AUDIO_FLAG_RESUME | LINK_AUDIO_FLAG_KEEP | 0x80; /* 0x80 is not sent */
+    in.u.audio.volume = 14;
+    in.u.audio.fade_ds = 30;
+    strcpy(in.u.audio.folder, "sleep");
+    uint8_t expected[LINK_HEADER_SIZE + 28];
+    memset(expected, 0, sizeof(expected));
+    const uint8_t head[] = {0xBA, 0x01, 0x07, 0x01, 0x02, 0x01, 0x02, 0x03, 0x0E, 0x1E, 0x00, 's', 'l', 'e', 'e', 'p'};
+    memcpy(expected, head, sizeof(head));
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), encode());
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, frame, sizeof(expected));
+    round_trip();
+    TEST_ASSERT_EQUAL_UINT8(LINK_AUDIO_PLAY, out.u.audio.cmd);
+    TEST_ASSERT_EQUAL_HEX8(LINK_AUDIO_FLAG_RESUME | LINK_AUDIO_FLAG_KEEP, out.u.audio.flags);
+    TEST_ASSERT_EQUAL_UINT8(14, out.u.audio.volume);
+    TEST_ASSERT_EQUAL_UINT16(30, out.u.audio.fade_ds);
+    TEST_ASSERT_EQUAL_STRING("sleep", out.u.audio.folder);
+
+    /* unknown flag bits from a newer sender are dropped */
+    frame[LINK_HEADER_SIZE + 1] = 0xF2;
+    TEST_ASSERT_TRUE(link_msg_decode(frame, sizeof(expected), &out));
+    TEST_ASSERT_EQUAL_HEX8(LINK_AUDIO_FLAG_KEEP, out.u.audio.flags);
+
+    /* a folder name that fills the field has no NUL on the wire */
     setUp();
     in.type = LINK_AUDIO;
-    in.u.audio.cmd = LINK_AUDIO_SLEEP_TIMER;
-    in.u.audio.arg1 = 45;
-    in.u.audio.arg2 = 120;
+    in.u.audio.cmd = LINK_AUDIO_STOP;
+    in.u.audio.fade_ds = 1200;
+    memset(in.u.audio.folder, 'm', LINK_FOLDER_LEN);
+    in.u.audio.folder[LINK_FOLDER_LEN] = '\0';
+    const size_t n = encode();
+    TEST_ASSERT_EQUAL_HEX8('m', frame[n - 1]);
     round_trip();
-    TEST_ASSERT_EQUAL_UINT8(LINK_AUDIO_SLEEP_TIMER, out.u.audio.cmd);
-    TEST_ASSERT_EQUAL_UINT8(45, out.u.audio.arg1);
-    TEST_ASSERT_EQUAL_UINT16(120, out.u.audio.arg2);
+    TEST_ASSERT_EQUAL_UINT8(LINK_AUDIO_STOP, out.u.audio.cmd);
+    TEST_ASSERT_EQUAL_UINT16(1200, out.u.audio.fade_ds);
+    TEST_ASSERT_EQUAL_size_t(LINK_FOLDER_LEN, strlen(out.u.audio.folder));
+}
+
+static void test_folder_messages(void)
+{
+    in.type = LINK_FOLDER;
+    in.flags = LINK_FLAG_ACK_REQ;
+    in.seq = 5;
+    in.u.folder.index = 2;
+    in.u.folder.count = 7;
+    strcpy(in.u.folder.name, "mood_rain");
+    uint8_t expected[LINK_HEADER_SIZE + 25];
+    memset(expected, 0, sizeof(expected));
+    const uint8_t head[] = {0xBA, 0x01, 0x0C, 0x01, 0x05, 0x00, 0x02, 0x07, 'm', 'o', 'o', 'd', '_', 'r', 'a', 'i', 'n'};
+    memcpy(expected, head, sizeof(head));
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), encode());
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, frame, sizeof(expected));
+    round_trip();
+    TEST_ASSERT_EQUAL_UINT8(2, out.u.folder.index);
+    TEST_ASSERT_EQUAL_UINT8(7, out.u.folder.count);
+    TEST_ASSERT_EQUAL_STRING("mood_rain", out.u.folder.name);
+
+    /* no NUL on the wire: the name still comes back terminated */
+    const size_t n = encode();
+    memset(frame + LINK_HEADER_SIZE + 2, 'x', LINK_FOLDER_LEN);
+    TEST_ASSERT_TRUE(link_msg_decode(frame, n, &out));
+    TEST_ASSERT_EQUAL_size_t(LINK_FOLDER_LEN, strlen(out.u.folder.name));
 }
 
 static void test_game_messages(void)
@@ -237,7 +297,7 @@ static void test_encode_errors(void)
     TEST_ASSERT_EQUAL_size_t(0, link_msg_encode(&in, NULL, sizeof(frame)));
     in.type = (link_type_t)0;
     TEST_ASSERT_EQUAL_size_t(0, link_msg_encode(&in, frame, sizeof(frame)));
-    in.type = (link_type_t)12;
+    in.type = (link_type_t)13;
     TEST_ASSERT_EQUAL_size_t(0, link_msg_encode(&in, frame, sizeof(frame)));
 }
 
@@ -279,7 +339,7 @@ static void test_decode_rejects_bad_frames(void)
     memcpy(bad, frame, n);
     bad[2] = 0;
     TEST_ASSERT_FALSE_MESSAGE(link_msg_decode(bad, n, &out), "type 0");
-    bad[2] = 12;
+    bad[2] = 13;
     TEST_ASSERT_FALSE_MESSAGE(link_msg_decode(bad, n, &out), "unknown type");
     bad[2] = LINK_HELLO; /* needs 18 bytes of payload, the frame has 7 */
     TEST_ASSERT_FALSE_MESSAGE(link_msg_decode(bad, n, &out), "payload too short for the type");
@@ -333,6 +393,8 @@ int main(void)
     RUN_TEST(test_time_alarm_bytes);
     RUN_TEST(test_ack_and_heartbeat);
     RUN_TEST(test_ring_messages);
+    RUN_TEST(test_audio_bytes);
+    RUN_TEST(test_folder_messages);
     RUN_TEST(test_game_messages);
     RUN_TEST(test_encode_errors);
     RUN_TEST(test_unknown_flag_bits_are_not_sent_or_kept);

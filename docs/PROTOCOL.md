@@ -28,7 +28,7 @@ The contract between the firmware and everything it talks to: the server (MQTT, 
 {"online":true,"node":"bath","fw":"2.0.0","built":"2026-11-15T14:02:11Z","boot":17,"reset":"poweron",
  "uptime_s":8123,"wifi_rssi":-58,"ip":"192.168.1.40","heap_min":141232,
  "groups":["settings","net","bath"],"settings_version":12,
- "mode":"ambient","volume":14,"hue":"ok","sd":"ok","tracks":{"A":29,"B":12,"C":8,"V":4},
+ "mode":"ambient","volumes":{"ambient":14,"cold":10},"hue":"ok","sd":"ok","tracks":{"A":29,"B":12,"C":8,"V":4},
  "cold":{"phase":"cold","remaining_s":41,"profile":"hype","switch":"hype"}}
 ```
 
@@ -36,9 +36,11 @@ The contract between the firmware and everything it talks to: the server (MQTT, 
 
 | Node | Members |
 | --- | --- |
-| bath | `mode` (`normal`/`ambient`/`cold`), `volume`, `hue`, `sd`, `tracks`, `cold` |
-| bedroom_speaker | `playing` (`none`/`sleep`/`alarm`/`music`), `volume`, `sd`, `tracks`, `armed` (`{"state":"waiting","version":41,"alarm_utc":1795030000}`), `link` (`up`/`down`) |
-| bedside | `time` (local ISO), `time_source` (`sntp`/`rtc`/`none`), `armed_switch`, `next_alarm` (`{"slot":1,"local":"2026-11-16T06:45:00"}` or null), `alarm` (`idle`/`armed`/`sunrise`/`ringing`/`snoozed`), `light` (0–1000), `speaker` (`up`/`down`), `game` (`{"state":"idle","hits":0,"needed":3}`) |
+| bath | `mode` (`normal`/`ambient`/`cold`), `volumes` (`{"ambient":14,"cold":10}`, steps 0–32), `hue`, `sd`, `tracks`, `cold` |
+| bedroom_speaker | `playing` (`none`/`alarm`/`music`), `folder` (the folder playing, or ""), `kept` (`true` while the session is a KEEP one), `volume`, `sd`, `folders` (names of the root folders on the card, as sent in `LINK_FOLDER`), `armed` (`{"state":"waiting","version":41,"alarm_utc":1795030000}`), `link` (`up`/`down`) |
+| bedside | `time` (local ISO), `time_source` (`sntp`/`rtc`/`none`), `armed_switch`, `next_alarm` (`{"slot":1,"local":"2026-11-16T06:45:00"}` or null), `alarm` (`idle`/`armed`/`sunrise`/`ringing`/`snoozed`), `light` (0–1000), `mode` (`none`/`meditation`/`mood`/`sleep`), `fading`, `candles`, `volumes` (`{"meditation":10,"mood":14,"sleep":8}`), `remaining_s` (of the running mode's timer, or null), `speaker` (`up`/`down`), `game` (`{"state":"idle","hits":0,"needed":3}`) |
+
+The web app shows `mood_folder` (a `bed` setting) as a dropdown filled from the speaker's `folders` that start with `mood_`; `sleep_folder` and `med_folder` as dropdowns of all folders. The mood button changes `mood_folder` on the device, which reports it like any local change.
 
 ### Settings
 
@@ -82,8 +84,7 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 | `log/verbose` | all | `{"minutes":10}` | send DEBUG lines for that long |
 | `restart` | all | – | reboot |
 | `alarm/stop`, `alarm/snooze` | bedside | – | like the big button (refused while the game is required) |
-| `sleep/start`, `sleep/stop` | bedside | `{"folder":3,"minutes":45}` | sleep sounds on the speaker |
-| `mood` | bedside | `{"on":true}` | mood mode |
+| `button` | bedside | `{"name":"sleep"}` (`meditation`, `mood`, `sleep`, `next`, `stop`) | like pressing that button (lib/bed_modes) |
 | `game/demo`, `game/selftest`, `game/stop` | bedside | – | demo game, self-test |
 | `game/calibrate`, `game/identify` | bedside | `{"node":"target-2"}` | forwarded to that target |
 | `link/pair` | bedside | `{"seconds":60}` | accept HELLO from new nodes for that long |
@@ -94,6 +95,7 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 ```json
 {"type":"clap","accepted":true,"peak_db":[-18.2,-19.0],"gap_ms":312,"rise_ms":[0.4,0.6],"band_db":[14.1,12.7]}
 {"type":"mode","mode":"ambient","by":"clap"}
+{"type":"mode","mode":"sleep","by":"button","continued":true}
 {"type":"cold","phase":"cold","profile":"hype"}
 {"type":"cold","end":"finished"}
 {"type":"alarm","event":"ring","slot":1,"game":true}
@@ -108,7 +110,7 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 {"type":"cold_session","id":3735928559,"start":1795000000,"profile":"hype","planned":{"warm":120,"cold":90,"after":300},"actual":{"warm":118,"cold":90,"after":12},"end":"aborted","skipped":true}
 ```
 
-Every event may carry `"t"` (UTC seconds) when the device knows the time. `by` is `clap`, `button`, `server` or `timer`. Alarm stop reasons: `button`, `game`, `remote`, `timeout`, `disarmed`.
+Every event may carry `"t"` (UTC seconds) when the device knows the time. Bedside `mode` events: `mode` is `meditation`, `mood`, `sleep` or `none`; `by` `button`, `server`, `timer` (a timer ran out) or `alarm`; `continued` only on sleep (true = a continuation of the night, no scene, no candles); `folder` on mood when the button moved to the next folder. `by` is `clap`, `button`, `server` or `timer`. Alarm stop reasons: `button`, `game`, `remote`, `timeout`, `disarmed`.
 
 ### Records
 
@@ -201,11 +203,12 @@ byte 6…   payload         fields in struct order, little-endian, no padding
 | TIME_ALARM | 4 | bedside → speaker, gun, targets | yes | version u32, utc_now u32, alarm_utc u32, sound u8, volume u8, fade_s u16, ring_max_min u8, game u8 (18) |
 | RING | 5 | bedside → speaker | yes | action u8 (1 start, 2 snooze, 3 stop, 4 escalate), version u32, arg u16 (7) |
 | RING_STATE | 6 | speaker → bedside | yes | state u8, reason u8, spare u8, ring_s u16 (5) |
-| AUDIO | 7 | bedside → speaker | yes | cmd u8 (1 stop, 2 play folder, 3 volume, 4 sleep timer), arg1 u8, arg2 u16 (4) |
+| AUDIO | 7 | bedside → speaker | yes | cmd u8 (1 stop, 2 play, 3 volume, 4 next), flags u8 (bit 0 resume, bit 1 keep), volume u8 (step 0–32), fade_ds u16 (tenths of a second), folder char[23] (28) |
 | GAME_CFG | 8 | bedside → gun, targets | yes | sights u8, zone u8, ammo u8, gun_id u8 (4) |
 | TARGET_CMD | 9 | bedside → target | yes | cmd u8 (1 light, 2 off, 3 identify, 4 calibrate), round u8, arg_ms u16 (4) |
 | TARGET_EVT | 10 | target → bedside | yes | evt u8 (1 hit, 2 timeout, 3 calibrated), round u8, gun_id u8, value u16 (5) |
 | GUN_EVT | 11 | gun → bedside | yes | evt u8 (1 shot, 2 dry, 3 reload, 4 demo request), shot u8, ammo_left u8 (3) |
+| FOLDER | 12 | speaker → bedside | yes | index u8, count u8, name char[23] (25) |
 
 Rules:
 
@@ -214,7 +217,9 @@ Rules:
 - Liveness: any frame counts. 15 s of silence = peer down.
 - HEARTBEAT `state`: speaker = `armed_state_t` (0 idle, 1 waiting, 2 ringing, 3 snoozed); target = LED state; gun = 0 awake, 1 about to sleep.
 - TIME_ALARM is sent on every change of time or schedule and with every heartbeat of the bedside. A copy with a lower version than the one held is discarded. `alarm_utc` 0 = no alarm.
-- RING stop is obeyed whatever its version. RING start while ringing is ignored.
+- RING stop is obeyed whatever its version. RING start while ringing is ignored. RING start stops any music at once (a KEEP session saves its resume point first).
+- AUDIO: the bedside owns all timers (sleep, meditation); the speaker only plays, fades and stops. PLAY replaces what plays. A PLAY with RESUME continues the last KEEP session of that folder at its exact track and byte position (`lib/resume_point`, saved in NVS), or starts a fresh shuffle if there is none. A RESUME PLAY of the folder already playing, also during its fade-out, cancels the fade and plays on. VOLUME applies under any fade. Unused fields are 0; text fields are NUL-padded, without a NUL when full.
+- FOLDER: the speaker sends its folder list after every card scan and after a HELLO from the bedside, one acked frame per folder (`index` 0 … `count`-1); `count` 0 = no folders. Only names that pass `cfg_folder_valid()` are listed (1–23 of `A-Z a-z 0-9 _ -`).
 - Capabilities (`caps`): 0x01 audio, 0x02 light, 0x04 laser, 0x08 hit sensor, 0x10 moving, 0x20 magazine, 0x40 battery.
 - Pairing: the bedside stores the MAC addresses of its speaker, gun and targets; frames from other addresses are dropped. ESP-NOW encryption with a key set at pairing.
 - Channel: bedside and speaker use the router's channel. Gun and targets send HELLO on channels 1–13 in turn until the bedside acks, and remember the channel.

@@ -76,8 +76,10 @@ static void test_key_lists(void)
         "zen_scene_warm",  "zen_scene_cold",  "zen_scene_after"};
     static const char *const bed_keys[] = {"tz",           "alarm1",       "alarm2",          "alarm3",       "alarm4",
                                            "alarm5",       "alarm6",       "sunrise_min",     "sunrise_level", "sound_fade_s",
-                                           "alarm_volume", "snooze_min",   "ring_max_min",    "sleep_timer_min",
-                                           "sleep_fade_s", "mood_level",   "scene_mood",      "scene_wake"};
+                                           "alarm_volume", "snooze_min",   "ring_max_min",    "sleep_folder",
+                                           "sleep_timer_min", "sleep_fade_s", "sleep_candle_min", "scene_sleep",
+                                           "med_folder",   "med_min",      "med_fade_s",      "scene_med",
+                                           "mood_folder",  "scene_mood",   "scene_wake"};
     static const char *const game_keys[] = {"game_on",   "game_preset", "game_hits",    "game_lit_s",    "game_targets",
                                             "game_zone", "game_ammo",   "game_penalty", "game_escalate", "game_sights"};
     expect_keys(&cfg_net_table, "net", net_keys, sizeof(net_keys) / sizeof(net_keys[0]));
@@ -223,9 +225,16 @@ static void test_bed_defaults_and_rules(void)
     TEST_ASSERT_EQUAL_UINT8(16, bed.alarm_volume);
     TEST_ASSERT_EQUAL_UINT8(9, bed.snooze_min);
     TEST_ASSERT_EQUAL_UINT8(15, bed.ring_max_min);
-    TEST_ASSERT_EQUAL_UINT8(45, bed.sleep_timer_min);
+    TEST_ASSERT_EQUAL_STRING("sleep", bed.sleep_folder);
+    TEST_ASSERT_EQUAL_UINT8(30, bed.sleep_timer_min);
     TEST_ASSERT_EQUAL_UINT16(120, bed.sleep_fade_s);
-    TEST_ASSERT_EQUAL_UINT8(20, bed.mood_level);
+    TEST_ASSERT_EQUAL_UINT8(5, bed.sleep_candle_min);
+    TEST_ASSERT_EQUAL_STRING("", bed.scene_sleep);
+    TEST_ASSERT_EQUAL_STRING("meditation", bed.med_folder);
+    TEST_ASSERT_EQUAL_UINT8(20, bed.med_min);
+    TEST_ASSERT_EQUAL_UINT16(30, bed.med_fade_s);
+    TEST_ASSERT_EQUAL_STRING("", bed.scene_med);
+    TEST_ASSERT_EQUAL_STRING("", bed.mood_folder);
     TEST_ASSERT_EQUAL_STRING("", bed.scene_mood);
     TEST_ASSERT_EQUAL_STRING("", bed.scene_wake);
 
@@ -257,8 +266,43 @@ static void test_bed_defaults_and_rules(void)
     OK(cfg_bed_table, bed, "sleep_fade_s", "600");
     TEST_ASSERT_EQUAL_UINT16(600, bed.sleep_fade_s);
     FAILS(cfg_bed_table, bed, "sleep_fade_s", "601", KV_ERR_RANGE);
-    FAILS(cfg_bed_table, bed, "mood_level", "101", KV_ERR_RANGE);
+    OK(cfg_bed_table, bed, "sleep_candle_min", "120");
+    FAILS(cfg_bed_table, bed, "sleep_candle_min", "121", KV_ERR_RANGE);
+    OK(cfg_bed_table, bed, "med_min", "180");
+    FAILS(cfg_bed_table, bed, "med_min", "0", KV_ERR_RANGE);
+    FAILS(cfg_bed_table, bed, "med_min", "181", KV_ERR_RANGE);
+    OK(cfg_bed_table, bed, "med_fade_s", "0");
+    FAILS(cfg_bed_table, bed, "med_fade_s", "601", KV_ERR_RANGE);
     OK(cfg_bed_table, bed, "scene_wake", UUID_A);
+    OK(cfg_bed_table, bed, "scene_sleep", UUID_A);
+    OK(cfg_bed_table, bed, "scene_med", UUID_A);
+    FAILS(cfg_bed_table, bed, "scene_med", "scene 3", KV_ERR_INVALID);
+
+    /* folders */
+    OK(cfg_bed_table, bed, "mood_folder", "mood_Rain-2");
+    TEST_ASSERT_EQUAL_STRING("mood_Rain-2", bed.mood_folder);
+    OK(cfg_bed_table, bed, "sleep_folder", "true_crime");
+    OK(cfg_bed_table, bed, "med_folder", "abcdefghijklmnopqrstuvw"); /* 23 */
+    FAILS(cfg_bed_table, bed, "med_folder", "abcdefghijklmnopqrstuvwx", KV_ERR_RANGE);
+    FAILS(cfg_bed_table, bed, "sleep_folder", "true crime", KV_ERR_INVALID);
+    FAILS(cfg_bed_table, bed, "sleep_folder", "a/b", KV_ERR_INVALID);
+    FAILS(cfg_bed_table, bed, "mood_folder", "mood.rain", KV_ERR_INVALID);
+    OK(cfg_bed_table, bed, "sleep_folder", ""); /* no sleep music */
+    OK(cfg_bed_table, bed, "mood_folder", "");
+}
+
+static void test_folder_names(void)
+{
+    TEST_ASSERT_TRUE(cfg_folder_valid("sleep"));
+    TEST_ASSERT_TRUE(cfg_folder_valid("Mood_Jazz-1"));
+    TEST_ASSERT_TRUE(cfg_folder_valid(""));
+    TEST_ASSERT_TRUE(cfg_folder_valid("abcdefghijklmnopqrstuvw"));
+    TEST_ASSERT_FALSE(cfg_folder_valid("abcdefghijklmnopqrstuvwx"));
+    TEST_ASSERT_FALSE(cfg_folder_valid("with space"));
+    TEST_ASSERT_FALSE(cfg_folder_valid("dot.ted"));
+    TEST_ASSERT_FALSE(cfg_folder_valid("sl/ash"));
+    TEST_ASSERT_FALSE(cfg_folder_valid("umlaut\xc3\xa4"));
+    TEST_ASSERT_FALSE(cfg_folder_valid(NULL));
 }
 
 static void test_game_defaults_and_rules(void)
@@ -311,6 +355,7 @@ int main(void)
     RUN_TEST(test_bath_defaults);
     RUN_TEST(test_bath_profiles_are_separate);
     RUN_TEST(test_bed_defaults_and_rules);
+    RUN_TEST(test_folder_names);
     RUN_TEST(test_game_defaults_and_rules);
     return UNITY_END();
 }

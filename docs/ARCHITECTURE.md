@@ -85,7 +85,7 @@ src/
 
 ## Library modules
 
-"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). All 515 are green.
+"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). "v2.1" modules came with the bedside buttons and per-mode volume: their contracts and tests are written, the code is a stub to replace (61 tests, red until then).
 
 | Module | Used by | Job | State |
 | --- | --- | --- | --- |
@@ -112,11 +112,14 @@ src/
 | `light_ramp` | bedside | fades and gamma for the LED channels | v2 |
 | `armed_alarm` | speaker | rings from its own copy | v2 |
 | `game` | bedside | game master, self-test | v2 |
+| `bed_modes` | bedside | meditation, mood, sleep, next, stop; nights; candles | v2.1 |
+| `mode_volume` | bath, bedside | one encoder volume per music mode | v2.1 |
+| `resume_point` | speaker | where the sleep session stopped, as an NVS blob | v2.1 |
 | `pulse_code` | gun, target | the coded laser burst | v2 |
 | `gun_logic` | gun | trigger, magazine, sights, sleep | v2 |
 | `target_logic` | target | lit / hit / timeout, sleep plan | v2 |
 
-Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
+Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `mode_volume → volume`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
 
 ## Settings
 
@@ -228,6 +231,8 @@ Candles, fountain, amplifier and the volume fade stay with `mode_controller` and
 
 **Voice layer.** At boot and after a music sync the player reads the first 512 bytes of the four clips in `/V` through `wav_clip` and keeps their lengths for `cold_protocol_start()`. `voice_mix_process()` sits between the MP3 decoder and `pcm_mix`; the clip is read from the SD card inside the mixer's callback, in the player task, under the card mutex the player already holds.
 
+**Volume per mode (AUD-13/14, waits for `mode_volume`).** `control_task` replaces its one `volume_t` with a `mode_volume_t` of two modes: 0 = Ambient (NVS key `volume`, so the saved level carries over), 1 = cold-shower run (key `vol_cold`). The mode passed to `mode_volume_turn()`: 1 while `cold_protocol` runs (all phases, also the silent warm phase), else 0 while `mode_controller` is in Ambient or fading out of it, else `MODE_VOLUME_NONE` (Normal: the encoder does nothing). The amplifier gain uses `mode_volume_gain()` of the same mode. `mode_volume_take_save()` in a loop until it returns false, one NVS write per returned mode. Until `mode_volume` is implemented, the bath keeps its single volume.
+
 **Clap gate.** `mic_task` keeps the last 100 ms of samples. When `clap_detector` confirms a double clap it runs `clap_features_measure()` on a window around each onset; both must pass `clap_features_is_clap()`. The features go into the clap event either way, so the thresholds can be tuned from the web app's event list before the gate is switched on.
 
 **Carrier Rev A.** `expander_io.c` owns the `tca9555` driver (I2C on GPIO 1/2, address 0x20) and polls it every 10 ms. Buttons get a *source*: a GPIO now, an expander bit on the carrier, so nothing above `input_task` changes. Pin plan (in `board_pins.h` when the carrier arrives): button port n has its switch on P0(8−2n) and its LED on P0(9−2n); P10 SD detect, P11 status LED; outputs mask `0x02AA`, inverted inputs `0x0155`.
@@ -251,7 +256,29 @@ bedside (master)                                   speaker (follower)
 
 **Time.** The bedside sets the system clock from the RTC at boot and from SNTP when Wi-Fi is up (and writes SNTP time back to the RTC). `alarm_schedule` works in local seconds; the app converts with the `tz` setting (`setenv("TZ")`, `localtime_r`, `mktime`), which also decides what happens inside a daylight-saving jump. After every settings change, every stop and at midnight the app asks `alarm_next()` again, arms `alarm_ring` with the milliseconds left and sends a new `LINK_TIME_ALARM` with a higher version.
 
-**Tasks.** Bedside: `input_task` (big button: short = snooze, long 1.5 s = off; armed switch as a level), `bed_task` (20 ms tick: alarm_ring, light_ramp, game, link), `hue_task`, `mqtt_link`, Wi-Fi, optional `mic_task`. Speaker: `player_task`, `speaker_task` (100 ms tick: armed_alarm, link, button), `mqtt_link`, Wi-Fi. The speaker's amplifier follows the v1 rule: powered down unless something plays.
+**Tasks.** Bedside: `input_task` (big button: short = snooze, long 1.5 s = off; armed switch as a level; the five mode buttons; the encoder), `bed_task` (20 ms tick: alarm_ring, bed_modes, mode_volume, light_ramp, game, link), `hue_task`, `mqtt_link`, Wi-Fi, optional `mic_task`. Speaker: `player_task`, `speaker_task` (100 ms tick: armed_alarm, link, button), `mqtt_link`, Wi-Fi. The speaker's amplifier follows the v1 rule: powered down unless something plays.
+
+**Bedside buttons (BED-40 ... BED-52).** Five buttons on the bedside: meditation, mood, sleep, next, stop; plus the encoder for volume. `bed_modes` decides, `bed_task` carries it out each tick:
+
+```
+input_task ── button ──▶ bed_modes_button(btn, night, now)      night = bed_night_id(timegm(localtime)) or UNKNOWN
+alarm_ring ── ringing ─▶ bed_modes_alarm()
+bed_modes_take_cmd():
+  SCENE(which, ms)  → hue_task: scene_med / scene_mood / scene_sleep / scene_normal ("" = leave the lights)
+  PLAY(mode, resume, keep, ms) → LINK_AUDIO PLAY: folder from med_folder / mood_folder / sleep_folder,
+                                 volume = mode_volume_step(mode), fade_ds = ms / 100
+  STOP(ms)          → LINK_AUDIO STOP          NEXT → LINK_AUDIO NEXT
+  MOOD_FOLDER_NEXT  → mood_folder = bed_next_folder(speaker folders, mood_folder, "mood_"), stored as a
+                      local settings change (reported to the server, so the web app shows it)
+outputs.candles     → candle GPIO (LR7843 trigger, as in the bath)
+outputs.mode        → mode_volume: 0 meditation, 1 mood, 2 sleep, NONE (keys vol_med, vol_mood, vol_sleep)
+encoder turn        → mode_volume_turn(mode) → LINK_AUDIO VOLUME with the new step
+bed_modes_sleep_night() changed → NVS key sleep_night
+```
+
+`bed_modes` is created with `med_min`, `med_fade_s`, `sleep_timer_min`, `sleep_fade_s`, `sleep_candle_min` from the `bed` group; after a settings change it is re-created only while its mode is NONE (a running mode keeps its timings). Mood folder before the first PLAY: if `mood_folder` is "" or not on the card, `bed_next_folder(..., mood_folder, "mood_")` picks one and stores it. The speaker sends its folder list (`LINK_FOLDER`, one frame per folder) after every scan and on HELLO; the bedside keeps up to 32 names. If the speaker is down, PLAY/STOP are dropped with a log line; scenes and candles still work.
+
+Speaker side: `LINK_AUDIO PLAY` with `KEEP` makes the session a kept one: when it stops (STOP, another PLAY, RING start, standby) the speaker writes a `resume_point` blob (NVS key `resume`) with the position at that moment, before any fade. `RESUME` rebuilds the playlist with the stored seed, replays `index` tracks and seeks to `offset` if the name matches. RING start stops any music without a fade. The speaker reports `folders` and `playing` in its status.
 
 **Standby instead of a power switch.** A long press on the speaker's button stops playback and powers the amplifier down; the ESP32 stays up for the alarm. A speaker that is really switched off shows as "offline" on the bedside as soon as `link_peer` reports DOWN.
 

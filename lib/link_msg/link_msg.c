@@ -68,7 +68,7 @@ size_t link_msg_payload_size(link_type_t type)
     case LINK_RING_STATE:
         return 5;
     case LINK_AUDIO:
-        return 4;
+        return 28;
     case LINK_GAME_CFG:
         return 4;
     case LINK_TARGET_CMD:
@@ -77,12 +77,26 @@ size_t link_msg_payload_size(link_type_t type)
         return 5;
     case LINK_GUN_EVT:
         return 3;
+    case LINK_FOLDER:
+        return 25;
     default:
         return 0;
     }
 }
 
 /* ---- encode ------------------------------------------------------------- */
+
+/* Text field of n bytes: the text up to its first NUL, then NUL padding. */
+static void w_text(wr_t *w, const char *s, int n)
+{
+    bool ended = false;
+    for (int i = 0; i < n; i++) {
+        if (s[i] == '\0') {
+            ended = true;
+        }
+        w8(w, ended ? 0 : (uint8_t)s[i]);
+    }
+}
 
 static void encode_payload(const link_msg_t *m, wr_t *w)
 {
@@ -137,8 +151,10 @@ static void encode_payload(const link_msg_t *m, wr_t *w)
         break;
     case LINK_AUDIO:
         w8(w, m->u.audio.cmd);
-        w8(w, m->u.audio.arg1);
-        w16(w, m->u.audio.arg2);
+        w8(w, m->u.audio.flags & (LINK_AUDIO_FLAG_RESUME | LINK_AUDIO_FLAG_KEEP));
+        w8(w, m->u.audio.volume);
+        w16(w, m->u.audio.fade_ds);
+        w_text(w, m->u.audio.folder, LINK_FOLDER_LEN);
         break;
     case LINK_GAME_CFG:
         w8(w, m->u.game_cfg.sights);
@@ -161,6 +177,11 @@ static void encode_payload(const link_msg_t *m, wr_t *w)
         w8(w, m->u.gun_evt.evt);
         w8(w, m->u.gun_evt.shot);
         w8(w, m->u.gun_evt.ammo_left);
+        break;
+    case LINK_FOLDER:
+        w8(w, m->u.folder.index);
+        w8(w, m->u.folder.count);
+        w_text(w, m->u.folder.name, LINK_FOLDER_LEN);
         break;
     default:
         break;
@@ -191,6 +212,14 @@ size_t link_msg_encode(const link_msg_t *msg, uint8_t *out, size_t out_size)
 }
 
 /* ---- decode ------------------------------------------------------------- */
+
+static void r_text(rd_t *r, char *s, int n)
+{
+    for (int i = 0; i < n; i++) {
+        s[i] = (char)r8(r);
+    }
+    s[n] = '\0';
+}
 
 static void decode_payload(link_msg_t *m, rd_t *r)
 {
@@ -242,8 +271,10 @@ static void decode_payload(link_msg_t *m, rd_t *r)
         break;
     case LINK_AUDIO:
         m->u.audio.cmd = r8(r);
-        m->u.audio.arg1 = r8(r);
-        m->u.audio.arg2 = r16(r);
+        m->u.audio.flags = r8(r) & (LINK_AUDIO_FLAG_RESUME | LINK_AUDIO_FLAG_KEEP);
+        m->u.audio.volume = r8(r);
+        m->u.audio.fade_ds = r16(r);
+        r_text(r, m->u.audio.folder, LINK_FOLDER_LEN);
         break;
     case LINK_GAME_CFG:
         m->u.game_cfg.sights = r8(r);
@@ -266,6 +297,11 @@ static void decode_payload(link_msg_t *m, rd_t *r)
         m->u.gun_evt.evt = r8(r);
         m->u.gun_evt.shot = r8(r);
         m->u.gun_evt.ammo_left = r8(r);
+        break;
+    case LINK_FOLDER:
+        m->u.folder.index = r8(r);
+        m->u.folder.count = r8(r);
+        r_text(r, m->u.folder.name, LINK_FOLDER_LEN);
         break;
     default:
         break;

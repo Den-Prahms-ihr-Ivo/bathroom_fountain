@@ -19,26 +19,30 @@
  *                              are not acknowledged
  *   byte 6...  payload         fixed layout per type, see the structs below:
  *                              the fields in struct order, without padding;
- *                              bool as one byte 0/1; name as 12 bytes,
- *                              NUL-padded
+ *                              bool as one byte 0/1; name as 12 bytes and
+ *                              folder as 23 bytes, NUL-padded (no NUL on
+ *                              the wire when the text fills the field)
  *   The sender is known from the ESP-NOW source address, so no node id
  *   travels in the frame.
  *
  * Payload sizes: HELLO 18, ACK 2, HEARTBEAT 8, TIME_ALARM 18, RING 7,
- * RING_STATE 5, AUDIO 4, GAME_CFG 4, TARGET_CMD 4, TARGET_EVT 5, GUN_EVT 3.
+ * RING_STATE 5, AUDIO 28, GAME_CFG 4, TARGET_CMD 4, TARGET_EVT 5, GUN_EVT 3,
+ * FOLDER 25.
  *
  * link_msg_encode()
  *   Returns the frame length, or 0 if msg or out is NULL, the type is
  *   unknown or out is too small (LINK_FRAME_MAX always fits). Flag bits
- *   other than LINK_FLAG_ACK_REQ are sent as 0. hello.name is sent up to its
- *   first NUL or 12 bytes.
+ *   other than LINK_FLAG_ACK_REQ are sent as 0, and so are audio.flags bits
+ *   other than LINK_AUDIO_FLAG_RESUME / _KEEP. hello.name, audio.folder and
+ *   folder.name are sent up to their first NUL or the field's length.
  *
  * link_msg_decode()
  *   Returns false (out untouched) for: NULL, fewer than 6 bytes, wrong
  *   magic, a version other than 1, an unknown type, or a payload shorter
  *   than the type needs. Extra bytes after the payload are ignored, and
- *   unknown flag bits are dropped: a later version may append fields
- *   without breaking older nodes. hello.name always comes back
+ *   unknown flag bits are dropped (in the header and in audio.flags): a
+ *   later version may append fields without breaking older nodes.
+ *   hello.name, audio.folder and folder.name always come back
  *   NUL-terminated.
  */
 #ifndef LINK_MSG_H
@@ -55,9 +59,10 @@ extern "C" {
 #define LINK_MAGIC 0xBA
 #define LINK_PROTO_VERSION 1
 #define LINK_HEADER_SIZE 6
-#define LINK_FRAME_MAX 32 /* longest frame of this version */
+#define LINK_FRAME_MAX 34 /* longest frame of this version (AUDIO) */
 #define LINK_FLAG_ACK_REQ 0x01
 #define LINK_NAME_LEN 12
+#define LINK_FOLDER_LEN 23 /* folder names on the speaker's SD card */
 
 typedef enum {
     LINK_HELLO = 1,   /* any node, at start and when asked: who am I            */
@@ -66,11 +71,12 @@ typedef enum {
     LINK_TIME_ALARM,  /* bedside -> all: time of day and the next alarm         */
     LINK_RING,        /* bedside -> speaker: start, snooze, stop, escalate      */
     LINK_RING_STATE,  /* speaker -> bedside: what the alarm sound is doing      */
-    LINK_AUDIO,       /* bedside -> speaker: sleep sounds, mood, volume         */
+    LINK_AUDIO,       /* bedside -> speaker: play, stop, next, volume           */
     LINK_GAME_CFG,    /* bedside -> gun, targets: difficulty values they need   */
     LINK_TARGET_CMD,  /* bedside -> target                                      */
     LINK_TARGET_EVT,  /* target -> bedside                                      */
     LINK_GUN_EVT,     /* gun -> bedside                                         */
+    LINK_FOLDER,      /* speaker -> bedside: one folder name of the SD card     */
 } link_type_t;
 
 typedef enum {
@@ -140,18 +146,50 @@ typedef struct {
     uint16_t ring_s; /* seconds the current ring has lasted */
 } link_ring_state_t;
 
+/*
+ * AUDIO (bedside -> speaker). The bedside decides; the speaker plays.
+ *   STOP    fade out over fade_ds, then stop (and power the amplifier down).
+ *   PLAY    play `folder`, shuffled, fading in over fade_ds to `volume`.
+ *           Replaces whatever plays. flags:
+ *             RESUME  continue where the last KEEP session of this folder
+ *                     stopped (lib/resume_point); a fresh shuffle if there is
+ *                     none or it does not match the card any more. A RESUME
+ *                     PLAY of the folder that is playing (also while it fades
+ *                     out) cancels the fade and plays on from where it is.
+ *             KEEP    remember where this session stops.
+ *   VOLUME  set `volume` (applies under any running fade).
+ *   NEXT    next track of the running session.
+ *   Fields a command does not use are sent as 0.
+ */
 typedef enum {
     LINK_AUDIO_STOP = 1,
-    LINK_AUDIO_PLAY_FOLDER, /* arg1 = folder number, arg2 = fade-in s           */
-    LINK_AUDIO_VOLUME,      /* arg1 = 0 ... 32                                  */
-    LINK_AUDIO_SLEEP_TIMER, /* arg1 = minutes (0 = off), arg2 = fade-out s      */
+    LINK_AUDIO_PLAY,
+    LINK_AUDIO_VOLUME,
+    LINK_AUDIO_NEXT,
 } link_audio_cmd_t;
 
+#define LINK_AUDIO_FLAG_RESUME 0x01
+#define LINK_AUDIO_FLAG_KEEP 0x02
+
 typedef struct {
-    uint8_t cmd; /* link_audio_cmd_t */
-    uint8_t arg1;
-    uint16_t arg2;
+    uint8_t cmd;     /* link_audio_cmd_t                       */
+    uint8_t flags;   /* LINK_AUDIO_FLAG_*                      */
+    uint8_t volume;  /* step 0 ... 32 (lib/volume)             */
+    uint16_t fade_ds; /* fade time in tenths of a second        */
+    char folder[LINK_FOLDER_LEN + 1];
 } link_audio_t;
+
+/*
+ * FOLDER (speaker -> bedside): the folders in the root of the speaker's SD
+ * card, one per frame, in the order the speaker lists them, after every scan
+ * and whenever the bedside says HELLO. index 0 ... count-1; a card without
+ * folders is sent as one frame with count 0, index 0, name "".
+ */
+typedef struct {
+    uint8_t index;
+    uint8_t count;
+    char name[LINK_FOLDER_LEN + 1];
+} link_folder_t;
 
 typedef struct {
     uint8_t sights; /* 0 ... 100 percent      */
@@ -215,6 +253,7 @@ typedef struct {
         link_target_cmd_t target_cmd;
         link_target_evt_t target_evt;
         link_gun_evt_t gun_evt;
+        link_folder_t folder;
     } u;
 } link_msg_t;
 

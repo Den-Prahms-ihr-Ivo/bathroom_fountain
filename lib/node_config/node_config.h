@@ -2,7 +2,7 @@
  * node_config – the v2 setting groups: structs and their kv_table tables
  * (pure C, data only).
  *
- * Requirements: CFG-05 ... CFG-08, COLD-14, SRV-02, BED-05, GAME-10
+ * Requirements: CFG-05 ... CFG-08, COLD-14, SRV-02, BED-05, BED-50, GAME-10
  *               (see the requirements doc).
  * Tests:        test/test_node_config/
  *
@@ -56,11 +56,24 @@
  *   alarm_volume     uint    1-32                               16
  *   snooze_min       uint    1-30                               9
  *   ring_max_min     uint    1-60                               15
- *   sleep_timer_min  uint    0-240, 0 = no timer                45
- *   sleep_fade_s     uint    0-600                              120
- *   mood_level       uint    0-100 percent                      20
+ *   sleep_folder     folder  sleep music (lib/bed_modes)        sleep
+ *   sleep_timer_min  uint    0-240, 0 = no timer                30
+ *   sleep_fade_s     uint    0-600, fade-out after the timer    120
+ *   sleep_candle_min uint    0-120, candles at the night's      5
+ *                            first sleep press
+ *   scene_sleep      uuid                                       ""
+ *   med_folder       folder  meditation music                   meditation
+ *   med_min          uint    1-180, meditation length           20
+ *   med_fade_s       uint    0-600, music out / normal scene in 30
+ *   scene_med        uuid                                       ""
+ *   mood_folder      folder  current mood folder; the mood      ""
+ *                            button moves it to the next
+ *                            "mood_" folder. "" = the first one
  *   scene_mood       uuid                                       ""
  *   scene_wake       uuid                                       ""
+ *   The meditation timer's end recalls scene_normal (lib/settings).
+ *   folder = text, 0-23 characters of A-Z a-z 0-9 '_' '-' (cfg_folder_valid);
+ *   "" means "no music" for sleep_folder and med_folder.
  *
  * Group "game" (cfg_game_t) – alarm game, on the bedside node
  *   key            type    range                                default
@@ -142,9 +155,16 @@ typedef struct {
     uint8_t alarm_volume;
     uint8_t snooze_min;
     uint8_t ring_max_min;
+    char sleep_folder[24];
     uint8_t sleep_timer_min;
     uint16_t sleep_fade_s;
-    uint8_t mood_level;
+    uint8_t sleep_candle_min;
+    char scene_sleep[37];
+    char med_folder[24];
+    uint8_t med_min;
+    uint16_t med_fade_s;
+    char scene_med[37];
+    char mood_folder[24];
     char scene_mood[37];
     char scene_wake[37];
 } cfg_bed_t;
@@ -168,6 +188,11 @@ typedef struct {
     bool escalate;
     uint8_t sights;
 } cfg_game_t;
+
+/* Folder names on the speaker's SD card that the settings and the link can
+ * carry: 1 ... LINK_FOLDER_LEN (23) characters of A-Z a-z 0-9 '_' '-'.
+ * "" is accepted here too (the settings use it for "none"). NULL is false. */
+bool cfg_folder_valid(const char *name);
 
 extern const kv_table_t cfg_net_table;
 extern const kv_table_t cfg_bath_table;

@@ -55,6 +55,30 @@ static bool digits_check(const char *v)
     return true;
 }
 
+/* Characters only; the table's max gives the length (KV_ERR_RANGE). */
+static bool folder_chars_check(const char *v)
+{
+    for (; *v; v++) {
+        const char c = *v;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool cfg_folder_valid(const char *name)
+{
+    if (name == NULL || !folder_chars_check(name)) {
+        return false;
+    }
+    size_t n = 0;
+    while (name[n] != '\0' && n <= 23) {
+        n++;
+    }
+    return n <= 23;
+}
+
 /* ---- net ---------------------------------------------------------------- */
 
 static const kv_key_t net_keys[] = {
@@ -112,9 +136,16 @@ static const kv_key_t bed_keys[] = {
     {"alarm_volume", KV_UINT, KV_FIELD(cfg_bed_t, alarm_volume), 1, 32, "16", NULL, NULL},
     {"snooze_min", KV_UINT, KV_FIELD(cfg_bed_t, snooze_min), 1, 30, "9", NULL, NULL},
     {"ring_max_min", KV_UINT, KV_FIELD(cfg_bed_t, ring_max_min), 1, 60, "15", NULL, NULL},
-    {"sleep_timer_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_timer_min), 0, 240, "45", NULL, NULL},
+    {"sleep_folder", KV_TEXT, KV_FIELD(cfg_bed_t, sleep_folder), 1, 23, "sleep", NULL, folder_chars_check},
+    {"sleep_timer_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_timer_min), 0, 240, "30", NULL, NULL},
     {"sleep_fade_s", KV_UINT, KV_FIELD(cfg_bed_t, sleep_fade_s), 0, 600, "120", NULL, NULL},
-    {"mood_level", KV_UINT, KV_FIELD(cfg_bed_t, mood_level), 0, 100, "20", NULL, NULL},
+    {"sleep_candle_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_candle_min), 0, 120, "5", NULL, NULL},
+    {"scene_sleep", KV_UUID, KV_FIELD(cfg_bed_t, scene_sleep), 0, 0, NULL, NULL, NULL},
+    {"med_folder", KV_TEXT, KV_FIELD(cfg_bed_t, med_folder), 1, 23, "meditation", NULL, folder_chars_check},
+    {"med_min", KV_UINT, KV_FIELD(cfg_bed_t, med_min), 1, 180, "20", NULL, NULL},
+    {"med_fade_s", KV_UINT, KV_FIELD(cfg_bed_t, med_fade_s), 0, 600, "30", NULL, NULL},
+    {"scene_med", KV_UUID, KV_FIELD(cfg_bed_t, scene_med), 0, 0, NULL, NULL, NULL},
+    {"mood_folder", KV_TEXT, KV_FIELD(cfg_bed_t, mood_folder), 1, 23, NULL, NULL, folder_chars_check},
     {"scene_mood", KV_UUID, KV_FIELD(cfg_bed_t, scene_mood), 0, 0, NULL, NULL, NULL},
     {"scene_wake", KV_UUID, KV_FIELD(cfg_bed_t, scene_wake), 0, 0, NULL, NULL, NULL},
 };
