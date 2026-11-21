@@ -16,6 +16,7 @@ The contract between the firmware and everything it talks to: the server (MQTT, 
 | `shower/<id>/status` | D→S | 1 | yes | status document, on connect, on change, at most every 2 s, and every 60 s |
 | `shower/<id>/settings/desired` | S→D | 1 | yes | desired settings |
 | `shower/<id>/settings/reported` | D→S | 1 | yes | reported settings, after every apply and every local change |
+| `shower/<id>/settings/schema/<group>` | D→S | 1 | yes | how to draw that group's form, on every connect (`lib/settings_schema`) |
 | `shower/<id>/cmd/<name>` | S→D | 1 | no | command, see below |
 | `shower/<id>/event` | D→S | 1 | no | one event |
 | `shower/<id>/log` | D→S | 0 | no | one or more log lines |
@@ -32,15 +33,16 @@ The contract between the firmware and everything it talks to: the server (MQTT, 
  "cold":{"phase":"cold","remaining_s":41,"profile":"hype","switch":"hype"}}
 ```
 
-`node` is `bath`, `bedroom_speaker` or `bedside`. Common members: `online` … `settings_version`. Per node:
+`node` is `bath`, `bedroom_speaker`, `bedside` or `crate`. Common members: `online` … `settings_version`. Per node:
 
 | Node | Members |
 | --- | --- |
 | bath | `mode` (`normal`/`ambient`/`cold`), `volumes` (`{"ambient":14,"cold":10}`, steps 0–32), `hue`, `sd`, `tracks`, `cold` |
 | bedroom_speaker | `playing` (`none`/`alarm`/`music`), `folder` (the folder playing, or ""), `kept` (`true` while the session is a KEEP one), `volume`, `sd`, `folders` (names of the root folders on the card, as sent in `LINK_FOLDER`), `armed` (`{"state":"waiting","version":41,"alarm_utc":1795030000}`), `link` (`up`/`down`) |
+| crate | `state` (`closed`/`open`/`dim`/`closing`), `light` (0–1000), `playing`, `volume`, `battery_mv`, `battery` (`ok`/`low`/`empty`), `sd`, `tracks`. Before deep sleep: retained `{"online":false,"node":"crate","asleep":true,"battery_mv":12950,"battery":"ok"}` |
 | bedside | `time` (local ISO), `time_source` (`sntp`/`rtc`/`none`), `armed_switch`, `next_alarm` (`{"slot":1,"local":"2026-11-16T06:45:00"}` or null), `alarm` (`idle`/`armed`/`sunrise`/`ringing`/`snoozed`), `light` (0–1000), `mode` (`none`/`meditation`/`mood`/`sleep`), `fading`, `candles`, `volumes` (`{"meditation":10,"mood":14,"sleep":8}`), `remaining_s` (of the running mode's timer, or null), `speaker` (`up`/`down`), `game` (`{"state":"idle","hits":0,"needed":3}`) |
 
-The web app shows `mood_folder` (a `bed` setting) as a dropdown filled from the speaker's `folders` that start with `mood_`; `sleep_folder` and `med_folder` as dropdowns of all folders. The mood button changes `mood_folder` on the device, which reports it like any local change.
+The web app shows `mood_folder` and `sleep_folder` (`bed` settings) as dropdowns filled from the speaker's `folders` that start with `mood_` / `sleep_`, and `med_folder` as a dropdown of all folders. The mood button, and the sleep button while sleep plays, move to the next folder of the family on the device, which reports the new value like any local change.
 
 ### Settings
 
@@ -79,7 +81,7 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 | `scene/test` | bath, bedside | `{"scene":"<uuid>"}` | recall that scene now |
 | `hue/scenes` | bath, bedside | – | fetch the scene list from the bridge and publish it |
 | `voice/test` | bath | `{"cue":"go"}` (`go`, `warning`, `to_cold`, `done`) | play that clip |
-| `music/sync` | bath, speaker | `{"base":"https://…/files/","files":[{"path":"B/track01.mp3","size":4812345,"sha256":"…"}]}` | pull missing or changed files, delete files not listed, then publish an event `music` |
+| `music/sync` | bath, speaker, crate | `{"base":"https://…/files/","files":[{"path":"B/track01.mp3","size":4812345,"sha256":"…"}]}` | pull missing or changed files, delete files not listed, then publish an event `music` |
 | `ota` | all | `{"version":"2.0.1","url":"https://…/fw/bath-2.0.1.bin","sha256":"…"}` | download, verify, reboot; rollback if the new image does not confirm |
 | `log/verbose` | all | `{"minutes":10}` | send DEBUG lines for that long |
 | `restart` | all | – | reboot |
@@ -88,6 +90,8 @@ Payload `{}` unless listed. A device ignores commands it does not know and repor
 | `game/demo`, `game/selftest`, `game/stop` | bedside | – | demo game, self-test |
 | `game/calibrate`, `game/identify` | bedside | `{"node":"target-2"}` | forwarded to that target |
 | `link/pair` | bedside | `{"seconds":60}` | accept HELLO from new nodes for that long |
+| `identify` | all | `{"seconds":10}` | blink / beep so you can find the device |
+| `forget` | all | – | the device was removed in the web app: erase the broker account from NVS and go back to pairing (`enroll_forget`) |
 | `ack` | all | `{"type":"cold_session","id":3735928559}` | the backend has stored that record: the device drops it from its outbox (see Records) |
 
 ### Events
@@ -176,7 +180,42 @@ Published after boot, after pairing and on `cmd/hue/scenes`. The web app assigns
 
 ## 2. Device → server: HTTPS
 
-Downloads only, with the URLs from `cmd/ota` and `cmd/music/sync`. Authentication: HTTP basic with the device's broker account. Music downloads use `Range` requests so an interrupted file continues where it stopped. The server never calls the device.
+Downloads with the URLs from `cmd/ota` and `cmd/music/sync`, and pairing. Authentication for downloads: HTTP basic with the device's broker account. Music downloads use `Range` requests so an interrupted file continues where it stopped. The server never calls the device.
+
+### Pairing
+
+A device without a broker account (no `device_id` / `mqtt_user` / `mqtt_pass` in NVS) is *unclaimed*. It talks to `https://<server_host>/api/enroll` (`server_host` in the `net` group, written from the firmware's build default at the first boot; the setup page can change it). Messages are built and parsed by `lib/enroll_msg`; the device side is `lib/enroll`.
+
+```
+device                                    server                                   browser
+  POST hello  {"chip","node","fw","secret"}   ─▶ remembers chip, node, fw, public IP, last seen;
+  ◀─ {"state":"wait"}                            binds chip → secret on first sight
+  … every 10 s …                                                                    GET /api/devices/nearby
+                                                 lists unclaimed devices seen in the  ◀─ (same public IP as the
+                                                 last 60 s from the browser's IP          browser, see below)
+                                                                                    POST /api/devices/<chip>/claim
+  POST hello  ─▶                                 ◀─ marks a 60 s confirm window
+  ◀─ {"state":"confirm","window_s":60}           (blinks)                           "Hold the button for 3 s"
+  … polls every 2 s, blinks …
+  button held 3 s
+  POST confirm {"chip","secret","confirm":true} ─▶ window open and secret matches:
+                                                 creates broker account + ACL, device row
+  ◀─ {"state":"claimed","device_id","mqtt_host","mqtt_port","mqtt_user","mqtt_pass"}
+  saves into the net group, connects MQTT  ─▶   status arrives: device page opens  ──▶ "Bathroom added"
+```
+
+Rules:
+
+- **Who sees what.** `nearby` lists unclaimed devices whose last hello came from the same public IP as the browser's request, seen in the last 60 s, plus devices already in the account. Behind CGNAT or with IPv6 privacy addresses the match can fail; the Add page then offers "enter the chip id" (printed in the device's boot log and on its setup page) as a fallback, still with the 3 s hold.
+- **The hold is the proof.** Credentials go out only as the answer to a confirm that arrives inside the window with the secret the server bound to that chip. A forged hello for the same chip id from elsewhere has a different secret and is answered `{"state":"rejected","reason":"conflict"}`; the server shows the conflict in the web app. "Forget device" in the web app clears the binding.
+- **Answers.** `wait` (nothing to do), `confirm` (`window_s` 10–300), `claimed` (only to a confirm), `rejected` (`reason`). HTTP status 200 for all of them; anything else counts as no answer and the device just tries again.
+- **Rate.** Unclaimed: one hello every 10 s. Inside a window: every 2 s. The server answers at most 1 request/s per chip and per IP with 429.
+- **Which button.** Bath: the main button (3 s; without a window it starts Hue pairing as before). Bedside: the stop button. Bedroom speaker: its button, unless the alarm rings (then the 3 s press stops the alarm, as always). Crate: the encoder's push button, lid open (the strip pulses). Gun and targets have no Wi-Fi and never pair with the server; they pair with the bedside over ESP-NOW (`cmd/link/pair`).
+- **Devices that sleep (crate).** The server keeps commands that wait for an answer (`music/sync`, `ota`) per device and sends them when the device's status next says `online:true`; `asleep:true` in the retained status means "fine, sleeping", not "lost".
+- **Losing the account.** Three "not authorised" answers from the broker in a row (account deleted on the server) or `cmd/forget`: the device erases the five net keys and is unclaimed again. Network errors never count.
+- **New secret after a flash erase.** The secret lives in NVS; erasing the whole flash (`pio run -t erase`, `esptool erase_flash`) makes the device generate a new one, and its next hello is answered `rejected`/`conflict`. The web app shows "this device has a new secret" with **Allow re-pair**, which drops the old binding; then Add and the 3 s hold as usual. Normal firmware uploads keep NVS and change nothing.
+- **No sticker needed.** The Add page finds devices by public IP, and lists chip id, node type and firmware for each. The chip id is also printed in the boot log and on the setup page, for the fallback. The secret is never printed or shown anywhere.
+- **Blink.** While a window is open the device shows it: bath candles pulse, bedside LEDs pulse, speaker status LED blinks.
 
 ## 3. Browser ↔ device: local fallback page
 
@@ -218,7 +257,7 @@ Rules:
 - HEARTBEAT `state`: speaker = `armed_state_t` (0 idle, 1 waiting, 2 ringing, 3 snoozed); target = LED state; gun = 0 awake, 1 about to sleep.
 - TIME_ALARM is sent on every change of time or schedule and with every heartbeat of the bedside. A copy with a lower version than the one held is discarded. `alarm_utc` 0 = no alarm.
 - RING stop is obeyed whatever its version. RING start while ringing is ignored. RING start stops any music at once (a KEEP session saves its resume point first).
-- AUDIO: the bedside owns all timers (sleep, meditation); the speaker only plays, fades and stops. PLAY replaces what plays. A PLAY with RESUME continues the last KEEP session of that folder at its exact track and byte position (`lib/resume_point`, saved in NVS), or starts a fresh shuffle if there is none. A RESUME PLAY of the folder already playing, also during its fade-out, cancels the fade and plays on. VOLUME applies under any fade. Unused fields are 0; text fields are NUL-padded, without a NUL when full.
+- AUDIO: the bedside owns all timers (sleep, meditation); the speaker only plays, fades and stops. PLAY replaces what plays. A PLAY with RESUME continues the last KEEP session of that folder at its exact track and byte position (`lib/resume_point`; one point per folder in NVS under `resume_key(folder)`), or starts a fresh shuffle if there is none. A RESUME PLAY of the folder already playing, also during its fade-out, cancels the fade and plays on. VOLUME applies under any fade. Unused fields are 0; text fields are NUL-padded, without a NUL when full.
 - FOLDER: the speaker sends its folder list after every card scan and after a HELLO from the bedside, one acked frame per folder (`index` 0 … `count`-1); `count` 0 = no folders. Only names that pass `cfg_folder_valid()` are listed (1–23 of `A-Z a-z 0-9 _ -`).
 - Capabilities (`caps`): 0x01 audio, 0x02 light, 0x04 laser, 0x08 hit sensor, 0x10 moving, 0x20 magazine, 0x40 battery.
 - Pairing: the bedside stores the MAC addresses of its speaker, gun and targets; frames from other addresses are dropped. ESP-NOW encryption with a key set at pairing.

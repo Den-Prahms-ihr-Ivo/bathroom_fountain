@@ -18,7 +18,7 @@ Requirement IDs (CLAP-02, COLD-05, BED-12, …) refer to the "Bathroom Clap Ambi
    Hue · music · cold   alarms · light · game     alarm sound, sleep sounds
         │                     ▲ ESP-NOW
         ▼                     ├──────────────┐
-   Hue bridge (LAN)         gun (C3)     targets (C3)          battery, no Wi-Fi
+   Hue bridge (LAN)         gun (C3)     targets (C3)          battery, Wi-Fi while awake
 ```
 
 | Node | Build (`pio run -e …`) | Hardware | Role |
@@ -28,6 +28,7 @@ Requirement IDs (CLAP-02, COLD-05, BED-12, …) refer to the "Bathroom Clap Ambi
 | bedside | `bedside` | ESP32-S3 (DevKit prototype, own PCB later), RTC | owns time and alarm schedule, sunrise light, buttons, game master |
 | gun | `gun` | ESP32-C3, laser, trigger | coded laser shots |
 | target | `target` | ESP32-C3, photodiode, LED ring | lights up, detects hits |
+| crate | `crate` | Louder-ESP32-S3 Plus on a 12.8 V LiFePO4 battery | lid open = light and choir; Wi-Fi while awake for music upload (docs/CRATE.md) |
 
 The rule that shapes everything: **the server is for control and management, never for function.** Claps, the cold shower and the alarm work with the server, the internet or the other node gone.
 
@@ -39,7 +40,7 @@ Three links, three jobs:
 | HTTPS, device → server | firmware images and music files (download only) | large files do not belong in MQTT |
 | ESP-NOW, node ↔ node | alarm copy, ring/snooze/stop, game commands and hits | works without router or internet, millisecond latency, battery nodes need no Wi-Fi |
 
-**Which nodes have their own server connection.** Bath, bedside and speaker each connect to the broker themselves: all three have Wi-Fi anyway (Hue, SNTP, music and OTA downloads), and a node that reports for itself keeps its status, logs and OTA when its partner is off. Only gun and targets have no Wi-Fi; the bedside node reports for them under `shower/<bedside>/node/<name>`. (The roadmap's topic table had the bedside bridged too; this replaces that row.) ESP-NOW and the Wi-Fi station share one radio and therefore one channel: bedside and speaker follow the router's channel, and gun and targets find the bedside node by trying the channels until a HELLO is answered.
+**Which nodes have their own server connection.** Bath, bedside, speaker and crate (while awake) each connect to the broker themselves: all three have Wi-Fi anyway (Hue, SNTP, music and OTA downloads), and a node that reports for itself keeps its status, logs and OTA when its partner is off. Only gun and targets have no Wi-Fi; the bedside node reports for them under `shower/<bedside>/node/<name>`. (The roadmap's topic table had the bedside bridged too; this replaces that row.) ESP-NOW and the Wi-Fi station share one radio and therefore one channel: bedside and speaker follow the router's channel, and gun and targets find the bedside node by trying the channels until a HELLO is answered.
 
 ## Three layers
 
@@ -85,7 +86,7 @@ src/
 
 ## Library modules
 
-"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). "v2.1" modules came with the bedside buttons and per-mode volume: their contracts and tests are written, the code is a stub to replace (61 tests, red until then).
+"v1" modules came with the first firmware (252 tests); "v2" modules were written test-first against their contracts for the new nodes (263 tests). "v2.1" modules came with the bedside buttons and per-mode volume (61 tests, implemented). "v2.2" modules hold the logic of the bedside, speaker and bath glue and the status documents, so the apps stay thin; "v2.3" modules are pairing with the server and the settings schema. For both, contracts and tests are written and the code is a stub to replace (v2.2: 92 tests, v2.3: 41 tests, red until then).
 
 | Module | Used by | Job | State |
 | --- | --- | --- | --- |
@@ -115,11 +116,19 @@ src/
 | `bed_modes` | bedside | meditation, mood, sleep, next, stop; nights; candles | v2.1 |
 | `mode_volume` | bath, bedside | one encoder volume per music mode | v2.1 |
 | `resume_point` | speaker | where the sleep session stopped, as an NVS blob | v2.1 |
+| `folder_list` | bedside | the speaker's folders, from `LINK_FOLDER` frames | v2.2 (stub) |
+| `bed_audio` | bedside | `bed_modes` commands → `LINK_AUDIO`, scene ids, volume slots and keys, mood folder | v2.2 (stub) |
+| `speaker_session` | speaker | `LINK_AUDIO`, alarm and standby → start / save / halt / next, fade level | v2.2 (stub) |
+| `resume_restore` | speaker | capture a resume point; find it again in a rebuilt playlist | v2.2 (stub) |
+| `bath_volume` | bath | which volume slot the encoder sets, NVS keys | v2.2 (stub) |
+| `status_json` | bath, speaker, bedside | status documents and mode / alarm / error / cmd events | v2.2 (stub) |
+| `enroll`, `enroll_msg` | every Wi-Fi node | pairing with the server: hello, 3 s hold, credentials | v2.3 (stub) |
+| `settings_schema` | every Wi-Fi node | how the web app draws each settings group | v2.3 (stub) |
 | `pulse_code` | gun, target | the coded laser burst | v2 |
 | `gun_logic` | gun | trigger, magazine, sights, sleep | v2 |
 | `target_logic` | target | lit / hit / timeout, sleep plan | v2 |
 
-Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `mode_volume → volume`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
+Dependencies between lib modules: `node_config → kv_table, alarm_schedule`; `mode_volume → volume`; `bed_audio → bed_modes, folder_list, link_msg, node_config, mode_volume`; `folder_list, speaker_session → link_msg, node_config`; `resume_restore → playlist, resume_point`; `bath_volume → mode_controller, mode_volume`; `status_json, settings_schema → cjson`; `enroll → enroll_msg → cjson, node_config`; `settings_schema → kv_table`; `settings_sync → cjson`; `armed_alarm, target_logic, game → link_msg` (for the shared message structs). Everything else stands alone.
 
 ## Settings
 
@@ -134,6 +143,7 @@ Three decisions:
 | bath | x | x | x | | |
 | bedroom speaker | x | x | | | |
 | bedside | x | x | | x | x |
+| crate | x | x | | | |
 
 `src/platform/app_settings.c` becomes the *store*: it chains `lib/settings` and the node's groups behind four callbacks (`sync_store_t`), persists a changed key to NVS under its name and tells the tasks. Console, fallback page and `settings_sync` all go through the store. Gun and targets have no settings; the bedside sends them what they need (`LINK_GAME_CFG`).
 
@@ -147,6 +157,7 @@ Server side: the server publishes the full desired set with a version; the devic
 | --- | --- | --- |
 | `mqtt_link.c` | esp-mqtt over TLS with the ESP-IDF certificate bundle; subscribes `settings/desired` and `cmd/#`; publishes status (retained, with last will "offline"), reported settings, events, logs; reconnect with backoff | `mqtt_topics`, `settings_sync` |
 | `log_capture.c` | `esp_log_set_vprintf` hook → `log_ring` (under a mutex) → publisher follows the ring by sequence number, drops below `log_level`, at most 10 lines/s; sends the reset reason at boot | `log_ring` |
+| `enroll_task.c` | pairing while unclaimed: HTTPS hello/confirm with `esp_http_client`, feeds `enroll`, writes or erases the five net keys, starts `mqtt_link` once claimed; the app passes its 3 s button hold in | `enroll`, `enroll_msg`, `node_config` |
 | `ota.c` | `cmd/ota` carries URL, version and SHA-256 → `esp_https_ota` into the other slot → reboot → confirm after Wi-Fi + broker are up, else roll back | – |
 | `music_sync.c` | `cmd/music/sync` carries a manifest; missing files are pulled over HTTPS in chunks into a temp name, renamed when complete; holds the card mutex per chunk, never while music needs it | – |
 | `fallback_http.c` | `http://<device_id>.local` on the LAN, PIN (`web_pin`): status, last log lines, Wi-Fi and server keys, firmware upload, restart. SoftAP `bas-setup-xxxx` when Wi-Fi fails for 2 minutes | `log_ring`, the store |
@@ -231,7 +242,7 @@ Candles, fountain, amplifier and the volume fade stay with `mode_controller` and
 
 **Voice layer.** At boot and after a music sync the player reads the first 512 bytes of the four clips in `/V` through `wav_clip` and keeps their lengths for `cold_protocol_start()`. `voice_mix_process()` sits between the MP3 decoder and `pcm_mix`; the clip is read from the SD card inside the mixer's callback, in the player task, under the card mutex the player already holds.
 
-**Volume per mode (AUD-13/14, waits for `mode_volume`).** `control_task` replaces its one `volume_t` with a `mode_volume_t` of two modes: 0 = Ambient (NVS key `volume`, so the saved level carries over), 1 = cold-shower run (key `vol_cold`). The mode passed to `mode_volume_turn()`: 1 while `cold_protocol` runs (all phases, also the silent warm phase), else 0 while `mode_controller` is in Ambient or fading out of it, else `MODE_VOLUME_NONE` (Normal: the encoder does nothing). The amplifier gain uses `mode_volume_gain()` of the same mode. `mode_volume_take_save()` in a loop until it returns false, one NVS write per returned mode. Until `mode_volume` is implemented, the bath keeps its single volume.
+**Volume per mode (AUD-13/14).** `control_task` replaces its one `volume_t` with a `mode_volume_t` of `BATH_VOL_COUNT` slots. `bath_volume_mode()` says which slot the encoder sets (cold run, Ambient or its fade-out, or none in Normal) and `bath_volume_key()` its NVS key (`volume` for Ambient, so the saved level carries over; `vol_cold`). The amplifier gain uses `mode_volume_gain()` of the same slot. `mode_volume_take_save()` in a loop until it returns false. Until `bath_volume` is implemented, the bath keeps its single volume.
 
 **Clap gate.** `mic_task` keeps the last 100 ms of samples. When `clap_detector` confirms a double clap it runs `clap_features_measure()` on a window around each onset; both must pass `clap_features_is_clap()`. The features go into the clap event either way, so the thresholds can be tuned from the web app's event list before the gate is switched on.
 
@@ -268,17 +279,18 @@ bed_modes_take_cmd():
   PLAY(mode, resume, keep, ms) → LINK_AUDIO PLAY: folder from med_folder / mood_folder / sleep_folder,
                                  volume = mode_volume_step(mode), fade_ds = ms / 100
   STOP(ms)          → LINK_AUDIO STOP          NEXT → LINK_AUDIO NEXT
-  MOOD_FOLDER_NEXT  → mood_folder = bed_next_folder(speaker folders, mood_folder, "mood_"), stored as a
-                      local settings change (reported to the server, so the web app shows it)
+  MOOD_FOLDER_NEXT  → mood_folder = bed_audio_next_folder(speaker folders, mood_folder, "mood_"), stored
+                      as a local settings change (reported to the server, so the web app shows it)
+  SLEEP_FOLDER_NEXT → the same for sleep_folder and "sleep_"
 outputs.candles     → candle GPIO (LR7843 trigger, as in the bath)
 outputs.mode        → mode_volume: 0 meditation, 1 mood, 2 sleep, NONE (keys vol_med, vol_mood, vol_sleep)
 encoder turn        → mode_volume_turn(mode) → LINK_AUDIO VOLUME with the new step
 bed_modes_sleep_night() changed → NVS key sleep_night
 ```
 
-`bed_modes` is created with `med_min`, `med_fade_s`, `sleep_timer_min`, `sleep_fade_s`, `sleep_candle_min` from the `bed` group; after a settings change it is re-created only while its mode is NONE (a running mode keeps its timings). Mood folder before the first PLAY: if `mood_folder` is "" or not on the card, `bed_next_folder(..., mood_folder, "mood_")` picks one and stores it. The speaker sends its folder list (`LINK_FOLDER`, one frame per folder) after every scan and on HELLO; the bedside keeps up to 32 names. If the speaker is down, PLAY/STOP are dropped with a log line; scenes and candles still work.
+`bed_modes` is created with `med_min`, `med_fade_s`, `sleep_timer_min`, `sleep_fade_s`, `sleep_candle_min` from the `bed` group; after a settings change it is re-created only while its mode is NONE (a running mode keeps its timings). Mood and sleep folder before a PLAY: `bed_audio_pick_folder()` with the family's prefix keeps the stored folder if it is on the card, else picks the next one of the family and stores it. Sleep folders behave exactly like mood folders: the sleep button while sleep plays moves to the next `sleep_` folder (the timer keeps running; switching is not extending); each folder continues where it stopped. The first sleep press of a night plays the current sleep folder from a random track. The speaker sends its folder list (`LINK_FOLDER`, one frame per folder) after every scan and on HELLO; the bedside keeps up to 32 names. If the speaker is down, PLAY/STOP are dropped with a log line; scenes and candles still work.
 
-Speaker side: `LINK_AUDIO PLAY` with `KEEP` makes the session a kept one: when it stops (STOP, another PLAY, RING start, standby) the speaker writes a `resume_point` blob (NVS key `resume`) with the position at that moment, before any fade. `RESUME` rebuilds the playlist with the stored seed, replays `index` tracks and seeks to `offset` if the name matches. RING start stops any music without a fade. The speaker reports `folders` and `playing` in its status.
+Speaker side: `LINK_AUDIO PLAY` with `KEEP` makes the session a kept one: when it stops (STOP, another PLAY, RING start, standby) the speaker writes a `resume_point` blob for that folder (NVS key `resume_key(folder)`, so every sleep folder has its own) with the position at that moment, before any fade. `RESUME` rebuilds the playlist with the stored seed, replays `index` tracks and seeks to `offset` if the name matches. RING start stops any music without a fade. The speaker reports `folders` and `playing` in its status.
 
 **Standby instead of a power switch.** A long press on the speaker's button stops playback and powers the amplifier down; the ESP32 stays up for the alarm. A speaker that is really switched off shows as "offline" on the bedside as soon as `link_peer` reports DOWN.
 
