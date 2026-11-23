@@ -17,10 +17,10 @@
 #endif
 
 /* microSD over SPI2 */
-#define PIN_SD_SCK   12
-#define PIN_SD_MOSI  11
-#define PIN_SD_MISO  13
-#define PIN_SD_CS    10
+#define PIN_SD_SCK   41
+#define PIN_SD_MOSI  40
+#define PIN_SD_MISO  39
+#define PIN_SD_CS     7
 
 /* Fixed by the board: amplifier */
 #define PIN_AMP_I2S_BCLK  14

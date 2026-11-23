@@ -7,7 +7,11 @@
  *           fade (0 ... 1000 per mille); fade_curve turns it into an even dB
  *           fade; times the encoder volume (lib/volume) -> TAS5825M code
  *   amp     power up while outputs.amp_on, down otherwise (2 s retry backoff)
- *   music   MUSIC_START / MUSIC_STOP -> player_play()
+ *   music   MUSIC_START -> the next track of one shuffle of the card's root,
+ *           always from its beginning (player_play_shuffle with the seed and
+ *           position kept in RTC memory, so the shuffle carries on across
+ *           deep sleep; a power cut starts a new one); MUSIC_STOP -> note the
+ *           position, player_play(false)
  *   blink   BLINK -> short off/on pattern on the strip
  *   sleep   outputs.sleep_ok -> amplifier PDN held low, ext0 wake on the lid,
  *           deep sleep. A wake-up is a fresh boot.
@@ -29,7 +33,9 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -60,7 +66,7 @@
 #define BATTERY_PERIOD_MS 2000u
 #define BATTERY_SAMPLES   8
 #define DIV_TOP_KOHM      1000u   /* 1 MOhm from the battery  */
-#define DIV_BOTTOM_KOHM   220u    /* 220 kOhm to GND          */
+#define DIV_BOTTOM_KOHM   100u    /* 220 kOhm to GND  ... sadly didnt have a 220k Ohm resitor at home      */
 
 #define AMP_RETRY_MS      2000u
 #define FAULT_POLL_MS     2000u
@@ -116,6 +122,35 @@ typedef struct {
 } crate_t;
 
 static crate_t s_crate;
+
+/* The shuffle, kept through deep sleep (RTC slow memory; lost on power-off). */
+#define SHUFFLE_MAGIC 0x53484631u /* "SHF1" */
+static RTC_DATA_ATTR struct {
+    uint32_t magic;
+    uint32_t seed;
+    uint32_t played; /* tracks of this shuffle handed out so far */
+} s_shuffle;
+
+static void shuffle_note(void)
+{
+    player_pos_t pos;
+    player_position(&pos);
+    if (pos.keep && pos.index > 0) { /* a shuffle of ours has run */
+        s_shuffle.seed = pos.seed;
+        s_shuffle.played = pos.index;
+        s_shuffle.magic = SHUFFLE_MAGIC;
+    }
+}
+
+static void shuffle_start(void)
+{
+    if (s_shuffle.magic != SHUFFLE_MAGIC) {
+        s_shuffle.seed = esp_random();
+        s_shuffle.played = 0;
+        s_shuffle.magic = SHUFFLE_MAGIC;
+    }
+    player_play_shuffle("", s_shuffle.seed, s_shuffle.played);
+}
 
 /* ------------------------------------------------------------- hardware -- */
 
@@ -327,6 +362,7 @@ static void go_to_sleep(uint32_t now)
 {
     save_volume(now, true);
     publish_asleep();
+    shuffle_note(); /* RTC memory keeps it through deep sleep */
     player_play(false);
     if (s_crate.amp && tas5825m_is_powered(s_crate.amp)) {
         tas5825m_power_down(s_crate.amp);
@@ -391,10 +427,11 @@ static void handle_events(uint32_t now)
         switch (e) {
         case CRATE_EV_MUSIC_START:
             ESP_LOGI(TAG, "music start");
-            player_play(true);
+            shuffle_start(); /* next track of the shuffle, from its beginning */
             break;
         case CRATE_EV_MUSIC_STOP:
             ESP_LOGI(TAG, "music stop");
+            shuffle_note();
             player_play(false);
             break;
         case CRATE_EV_BLINK:

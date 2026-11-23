@@ -59,6 +59,10 @@
  *   alarm_volume     uint    1-32                               16
  *   snooze_min       uint    1-30                               9
  *   ring_max_min     uint    1-60                               15
+ *   display_s        uint    3-120, how long a press of the     10
+ *                            big button shows the display
+ *   display_sunrise  bool    the display switches on at the     on
+ *                            sunrise start (bed_display)
  *   sleep_folder     folder  current sleep folder; the sleep    ""
  *                            button while sleep plays moves it
  *                            to the next "sleep_" folder.
@@ -162,6 +166,8 @@ typedef struct {
     uint8_t alarm_volume;
     uint8_t snooze_min;
     uint8_t ring_max_min;
+    uint8_t display_s;
+    bool display_sunrise;
     char sleep_folder[24];
     uint8_t sleep_timer_min;
     uint16_t sleep_fade_s;

@@ -137,6 +137,8 @@ static const kv_key_t bed_keys[] = {
     {"alarm_volume", KV_UINT, KV_FIELD(cfg_bed_t, alarm_volume), 1, 32, "16", NULL, NULL},
     {"snooze_min", KV_UINT, KV_FIELD(cfg_bed_t, snooze_min), 1, 30, "9", NULL, NULL},
     {"ring_max_min", KV_UINT, KV_FIELD(cfg_bed_t, ring_max_min), 1, 60, "15", NULL, NULL},
+    {"display_s", KV_UINT, KV_FIELD(cfg_bed_t, display_s), 3, 120, "10", NULL, NULL},
+    {"display_sunrise", KV_BOOL, KV_FIELD(cfg_bed_t, display_sunrise), 0, 0, "on", NULL, NULL},
     {"sleep_folder", KV_TEXT, KV_FIELD(cfg_bed_t, sleep_folder), 1, 23, NULL, NULL, folder_chars_check},
     {"sleep_timer_min", KV_UINT, KV_FIELD(cfg_bed_t, sleep_timer_min), 0, 240, "30", NULL, NULL},
     {"sleep_fade_s", KV_UINT, KV_FIELD(cfg_bed_t, sleep_fade_s), 0, 600, "120", NULL, NULL},

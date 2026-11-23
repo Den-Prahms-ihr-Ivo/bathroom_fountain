@@ -69,6 +69,7 @@ typedef enum {
     CMD_NEXT,
     CMD_RESCAN,
     CMD_FOLDER,
+    CMD_SHUFFLE,
     CMD_HOLD,
     CMD_RELEASE,
     CMD_CUE,
@@ -651,6 +652,30 @@ static void start_folder(const char *folder, bool keep, const resume_point_t *rp
     open_next();
 }
 
+/* CMD_SHUFFLE: the playlist of `seed`, `played` tracks skipped, the next one. */
+static void start_shuffle(const char *folder, uint32_t seed, uint32_t played)
+{
+    close_track();
+    strlcpy(s_cur_folder, folder, sizeof(s_cur_folder));
+    s_cur_keep = true;
+    if (!s_mounted) {
+        scan();
+    }
+    if (!build_playlist(folder, true, seed)) {
+        return;
+    }
+    if (played > RESUME_REPLAY_MAX) {
+        played = RESUME_REPLAY_MAX;
+    }
+    for (uint32_t i = 0; i < played && playlist_count(s_pl) > 0; i++) {
+        if (playlist_next(s_pl) == NULL) {
+            break;
+        }
+        s_index++;
+    }
+    open_next();
+}
+
 static void end_track(void)
 {
     if (s_frames_ok == 0) {
@@ -820,6 +845,15 @@ static void handle(const cmd_t *cmd)
             start_folder(cmd->folder, cmd->keep, cmd->has_rp ? &cmd->rp : NULL);
         }
         break;
+    case CMD_SHUFFLE:
+        s_playing = true;
+        if (s_hold) {
+            strlcpy(s_cur_folder, cmd->folder, sizeof(s_cur_folder)); /* started fresh at release */
+            s_cur_keep = true;
+        } else {
+            start_shuffle(cmd->folder, cmd->rp.seed, cmd->rp.index);
+        }
+        break;
     case CMD_STOP:
         if (s_playing) {
             s_playing = false;
@@ -950,6 +984,15 @@ void player_play_folder(const char *folder, bool keep, const resume_point_t *rp)
     if (rp != NULL) {
         cmd.rp = *rp;
     }
+    send(&cmd);
+}
+
+void player_play_shuffle(const char *folder, uint32_t seed, uint32_t played)
+{
+    cmd_t cmd = {.type = CMD_SHUFFLE};
+    strlcpy(cmd.folder, folder != NULL ? folder : "", sizeof(cmd.folder));
+    cmd.rp.seed = seed;
+    cmd.rp.index = played;
     send(&cmd);
 }
 

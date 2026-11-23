@@ -73,6 +73,14 @@ void player_set_default_folder(const char *folder);
  * A folder without playable tracks raises the "ended" flag. */
 void player_play_folder(const char *folder, bool keep, const resume_point_t *rp);
 
+/* Shuffle with a known seed: rebuild the folder's playlist with this seed,
+ * skip `played` tracks (the ones handed out before, as player_position()
+ * reported them in seed / index) and play the one after, from its start.
+ * played 0 = the first track of the round. The crate uses it so that every
+ * opening plays the next track of one shuffle, also across deep sleep. A
+ * card whose files changed simply gives a different order. */
+void player_play_shuffle(const char *folder, uint32_t seed, uint32_t played);
+
 /* Skip to the next track (console "next", bedside NEXT). */
 void player_next(void);
 

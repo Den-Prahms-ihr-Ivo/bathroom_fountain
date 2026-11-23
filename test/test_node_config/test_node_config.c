@@ -76,7 +76,8 @@ static void test_key_lists(void)
         "zen_scene_warm",  "zen_scene_cold",  "zen_scene_after"};
     static const char *const bed_keys[] = {"tz",           "alarm1",       "alarm2",          "alarm3",       "alarm4",
                                            "alarm5",       "alarm6",       "sunrise_min",     "sunrise_level", "sound_fade_s",
-                                           "alarm_volume", "snooze_min",   "ring_max_min",    "sleep_folder",
+                                           "alarm_volume", "snooze_min",   "ring_max_min",    "display_s",
+                                           "display_sunrise", "sleep_folder",
                                            "sleep_timer_min", "sleep_fade_s", "sleep_candle_min", "scene_sleep",
                                            "med_folder",   "med_min",      "med_fade_s",      "scene_med",
                                            "mood_folder",  "scene_mood",   "scene_wake"};
@@ -228,6 +229,8 @@ static void test_bed_defaults_and_rules(void)
     TEST_ASSERT_EQUAL_UINT8(16, bed.alarm_volume);
     TEST_ASSERT_EQUAL_UINT8(9, bed.snooze_min);
     TEST_ASSERT_EQUAL_UINT8(15, bed.ring_max_min);
+    TEST_ASSERT_EQUAL_UINT8(10, bed.display_s);
+    TEST_ASSERT_TRUE(bed.display_sunrise);
     TEST_ASSERT_EQUAL_STRING("", bed.sleep_folder);
     TEST_ASSERT_EQUAL_UINT8(30, bed.sleep_timer_min);
     TEST_ASSERT_EQUAL_UINT16(120, bed.sleep_fade_s);
@@ -264,6 +267,8 @@ static void test_bed_defaults_and_rules(void)
     FAILS(cfg_bed_table, bed, "snooze_min", "31", KV_ERR_RANGE);
     FAILS(cfg_bed_table, bed, "ring_max_min", "0", KV_ERR_RANGE);
     FAILS(cfg_bed_table, bed, "ring_max_min", "61", KV_ERR_RANGE);
+    FAILS(cfg_bed_table, bed, "display_s", "2", KV_ERR_RANGE);
+    FAILS(cfg_bed_table, bed, "display_s", "121", KV_ERR_RANGE);
     OK(cfg_bed_table, bed, "sleep_timer_min", "0");
     FAILS(cfg_bed_table, bed, "sleep_timer_min", "241", KV_ERR_RANGE);
     OK(cfg_bed_table, bed, "sleep_fade_s", "600");
